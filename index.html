@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Local Share P2P</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- QR Code library (CDN, no backend needed) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════
+       BACKGROUND GRID + NOISE OVERLAY
+  ════════════════════════════════════════════ -->
+  <div class="bg-grid"></div>
+  <div class="bg-noise"></div>
+
+  <!-- ═══════════════════════════════════════════
+       TOP BAR
+  ════════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      <span class="brand-name">Smart Local Share <em>P2P</em></span>
+    </div>
+    <div class="device-badge" id="deviceBadge">
+      <span class="device-icon" id="deviceIcon">💻</span>
+      <span id="deviceType">Desktop</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════
+       MAIN LAYOUT
+  ════════════════════════════════════════════ -->
+  <main class="main-layout">
+
+    <!-- ── LEFT PANEL: Role + Connection ─────── -->
+    <section class="panel panel-connect" id="connectPanel">
+
+      <!-- Step 1: Choose Role -->
+      <div class="step" id="stepRole">
+        <h2 class="step-title">Choose Your Role</h2>
+        <p class="step-desc">Pick how you want to participate in this transfer session.</p>
+        <div class="role-cards">
+          <button class="role-card" id="btnSender" onclick="chooseRole('sender')">
+            <span class="role-icon">📤</span>
+            <span class="role-label">Sender</span>
+            <span class="role-sub">Select &amp; send files</span>
+          </button>
+          <button class="role-card" id="btnReceiver" onclick="chooseRole('receiver')">
+            <span class="role-icon">📥</span>
+            <span class="role-label">Receiver</span>
+            <span class="role-sub">Accept incoming files</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2a: SENDER – share offer -->
+      <div class="step hidden" id="stepSenderOffer">
+        <h2 class="step-title">Share Connection Code</h2>
+        <p class="step-desc">Share this QR code or paste the code on the receiver device.</p>
+        <div class="qr-wrap" id="qrCode"></div>
+        <label class="field-label">Offer Code</label>
+        <textarea class="code-box" id="offerBox" readonly></textarea>
+        <button class="btn-neon" onclick="copyText('offerBox')">📋 Copy Offer Code</button>
+        <div class="divider">Then paste Answer from receiver:</div>
+        <label class="field-label">Answer Code</label>
+        <textarea class="code-box" id="answerInput" placeholder="Paste answer code here…"></textarea>
+        <button class="btn-neon" onclick="acceptAnswer()">✅ Connect</button>
+      </div>
+
+      <!-- Step 2b: RECEIVER – paste offer -->
+      <div class="step hidden" id="stepReceiverOffer">
+        <h2 class="step-title">Enter Offer Code</h2>
+        <p class="step-desc">Paste the offer code from the sender device below.</p>
+        <label class="field-label">Offer Code</label>
+        <textarea class="code-box" id="offerInput" placeholder="Paste offer code here…"></textarea>
+        <button class="btn-neon" onclick="generateAnswer()">🔗 Generate Answer</button>
+        <div class="hidden" id="answerSection">
+          <div class="divider">Share this Answer with sender:</div>
+          <label class="field-label">Answer Code</label>
+          <textarea class="code-box" id="answerBox" readonly></textarea>
+          <button class="btn-neon" onclick="copyText('answerBox')">📋 Copy Answer Code</button>
+        </div>
+      </div>
+
+      <!-- Connection status bar -->
+      <div class="status-bar" id="statusBar">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Disconnected</span>
+        <span class="role-pill hidden" id="rolePill"></span>
+      </div>
+
+      <!-- How it works accordion -->
+      <details class="how-it-works">
+        <summary>ℹ️ How does this work?</summary>
+        <div class="how-body">
+          <p><strong>WebRTC Signaling Flow:</strong></p>
+          <ol>
+            <li>Sender creates an <em>Offer</em> (SDP) describing the connection.</li>
+            <li>Offer is shared via QR code or copy-paste (this is the "signaling channel").</li>
+            <li>Receiver pastes the offer and generates an <em>Answer</em>.</li>
+            <li>Answer is pasted back on the sender side.</li>
+            <li>ICE candidates are bundled inside the SDP (trickle-less), so no extra exchange is needed.</li>
+            <li>WebRTC establishes a direct peer-to-peer DataChannel — no server involved.</li>
+          </ol>
+          <p><strong>Works on same WiFi AND different networks</strong> via STUN servers.</p>
+        </div>
+      </details>
+    </section>
+
+    <!-- ── RIGHT PANEL: Transfer ──────────────── -->
+    <section class="panel panel-transfer" id="transferPanel">
+
+      <!-- Drop Zone (Sender only) -->
+      <div class="drop-zone hidden" id="dropZone">
+        <div class="drop-inner" id="dropInner">
+          <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p class="drop-text">Drag &amp; drop files here</p>
+          <p class="drop-sub">or</p>
+          <button class="btn-outline" onclick="document.getElementById('fileInput').click()">Browse Files</button>
+          <input type="file" id="fileInput" multiple style="display:none" onchange="handleFileSelect(this.files)" />
+        </div>
+      </div>
+
+      <!-- File Queue -->
+      <div class="queue-wrap hidden" id="queueWrap">
+        <h3 class="section-title">
+          File Queue
+          <button class="btn-sm" onclick="document.getElementById('fileInput').click()">+ Add More</button>
+        </h3>
+        <ul class="file-queue" id="fileQueue"></ul>
+        <button class="btn-neon btn-send" id="btnSendAll" onclick="startTransfer()">🚀 Send All Files</button>
+      </div>
+
+      <!-- Active Transfer Card -->
+      <div class="transfer-card hidden" id="transferCard">
+        <div class="tf-header">
+          <span class="tf-filename" id="tfFilename">—</span>
+          <span class="tf-size" id="tfSize">—</span>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <span class="progress-pct" id="progressPct">0%</span>
+        </div>
+        <div class="tf-stats">
+          <div class="tf-stat"><span class="stat-lbl">Speed</span><span class="stat-val" id="tfSpeed">—</span></div>
+          <div class="tf-stat"><span class="stat-lbl">Remaining</span><span class="stat-val" id="tfETA">—</span></div>
+          <div class="tf-stat"><span class="stat-lbl">Transferred</span><span class="stat-val" id="tfTransferred">—</span></div>
+        </div>
+      </div>
+
+      <!-- Receiver waiting message -->
+      <div class="receiver-wait hidden" id="receiverWait">
+        <div class="pulse-ring"></div>
+        <p>Waiting for sender to send files…</p>
+      </div>
+
+      <!-- Transfer History -->
+      <div class="history-wrap" id="historyWrap">
+        <h3 class="section-title">Transfer History</h3>
+        <div class="history-empty" id="historyEmpty">No transfers yet.</div>
+        <ul class="history-list" id="historyList"></ul>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- Toast notification -->
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
