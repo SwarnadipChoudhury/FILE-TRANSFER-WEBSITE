@@ -1,54 +1,54 @@
 /**
- * ShareDrop — app.js
+ * ShareDrop — app.js (Cartoon Animated Edition)
  * ═══════════════════════════════════════════════════════
- * Architecture: Chunked P2P file transfer via WebRTC/PeerJS
  *
- * KEY BEHAVIOURS:
- *  - Sender shows QR → Receiver scans → connection opens
- *  - On connection: QR panel FADES OUT, files panel EXPANDS (sender)
- *                   Scanner view HIDES, connected view SHOWS (receiver)
- *  - Files are queued on selection; transfer only starts on Send button
- *  - File is read in 64 KB slices — never fully loaded into RAM
- *  - DataChannel backpressure prevents OOM on large (10 GB+) files
- *  - Pause / Resume / Cancel supported
- * ═══════════════════════════════════════════════════════
+ * KEY FEATURES:
+ *  - Chunked file transfer (64KB slices) — never OOM on 10GB+
+ *  - Backpressure via bufferedAmount polling
+ *  - Pause / Resume / Cancel
+ *  - Confirm modal before sending
+ *  - Retry popup on disconnect with auto-retry countdown
+ *  - sessionStorage remembers last role → retry goes back to same screen
+ *  - Files only transfer on explicit "Send" button click
+ *  - Full cartoon UI feedback: toast, badges, animated progress
  */
 
 'use strict';
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    CONSTANTS
-───────────────────────────── */
-const CHUNK_SIZE    = 64  * 1024;        // 64 KB per read
-const BUFFER_HIGH   = 4   * 1024 * 1024; // 4 MB  — stall if buffer exceeds
-const DRAIN_POLL_MS = 50;                 // buffer drain poll interval (ms)
+═══════════════════════════════ */
+const CHUNK_SIZE   = 64 * 1024;         // 64 KB
+const BUFFER_HIGH  = 4 * 1024 * 1024;   // 4 MB  — backpressure threshold
+const DRAIN_POLL   = 50;                 // ms between buffer checks
+const RETRY_AUTO_S = 8;                  // auto-retry countdown seconds
+const STORAGE_KEY  = 'sharedrop_role';   // sessionStorage key
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    STATE
-───────────────────────────── */
+═══════════════════════════════ */
 let peer         = null;
 let conn         = null;
 let myRole       = null;
 let myId         = null;
 let reconnecting = false;
+let peerInitDone = false;
 
-// TX
+// TX (sender)
 let txQueue      = [];
 let txMeta       = [];
 let txIdx        = 0;
 let txOffset     = 0;
 let txStart      = 0;
-let txTotalSent  = 0;
+let txActive     = false;
 let isPaused     = false;
 let isCancelled  = false;
-let txActive     = false;
 
-// RX
+// RX (receiver)
 let rxMeta       = null;
 let rxChunks     = [];
 let rxBytes      = 0;
 let rxStart      = 0;
-let rxCancelled  = false;
 let rxHistory    = [];
 
 // Camera
@@ -58,126 +58,168 @@ let _scanAttempts = 0;
 let qrFound      = false;
 let camActive    = false;
 
-// Modal
-let _modalOkFn   = null;
+// Retry
+let _retryCountdown = null;
+let _retrySecsLeft  = 0;
+let _retryRole      = null;
 
-/* ─────────────────────────────
+// Modal
+let _modalOkFn  = null;
+
+/* ═══════════════════════════════
    BOOT
-───────────────────────────── */
+═══════════════════════════════ */
 window.addEventListener('DOMContentLoaded', () => {
   const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
   const dl = document.getElementById('devLabel');
   if (dl) dl.textContent = mobile ? '📱 Mobile device' : '💻 Desktop';
+
+  // Stagger home elements entrance
+  const homeWrap = document.querySelector('.home-wrap');
+  if (homeWrap) {
+    [...homeWrap.children].forEach((el, i) => {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(24px)';
+      setTimeout(() => {
+        el.style.transition = 'opacity 0.5s cubic-bezier(0.34,1.56,0.64,1), transform 0.5s cubic-bezier(0.34,1.56,0.64,1)';
+        el.style.opacity = '1';
+        el.style.transform = 'none';
+      }, 80 + i * 90);
+    });
+  }
+
   initPeer();
 });
 
-/* ─────────────────────────────
-   PEER INIT
-───────────────────────────── */
+/* ═══════════════════════════════
+   PEERJS INIT
+═══════════════════════════════ */
 function initPeer() {
-  const dot  = document.getElementById('nsDot');
-  const text = document.getElementById('nsText');
-  if (dot)  dot.className  = 'ns-dot connecting';
-  if (text) text.textContent = 'Connecting to network…';
+  setNetStatus('connecting', 'Connecting…');
 
-  if (peer && !peer.destroyed) { try { peer.destroy(); } catch(e){} }
+  if (peer && !peer.destroyed) {
+    try { peer.destroy(); } catch(e) {}
+  }
 
   peer = new Peer(undefined, {
     host: '0.peerjs.com', port: 443, secure: true, path: '/',
     config: { iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478'  },
+      { urls: 'stun:stun.cloudflare.com:3478' },
     ]},
     debug: 0,
   });
 
-  peer.on('open', (id) => {
+  peer.on('open', id => {
     myId = id;
-    if (dot)  dot.className  = 'ns-dot ok';
-    if (text) text.textContent = 'Network ready';
+    peerInitDone = true;
+    reconnecting = false;
+    setNetStatus('ok', 'Network ready! ✓');
     document.getElementById('btnRoleSend').disabled = false;
     document.getElementById('btnRoleRecv').disabled = false;
-    reconnecting = false;
+
+    // If retrying and had a role, go back automatically
+    if (_retryRole) {
+      const role = _retryRole;
+      _retryRole = null;
+      hideRetryPopup();
+      showToast('🔌 Reconnected! Going back…');
+      setTimeout(() => chooseRole(role), 600);
+    }
   });
 
-  peer.on('error', (err) => {
-    if (dot)  dot.className  = 'ns-dot err';
-    if (text) text.textContent = 'Network error — retrying…';
-    showToast('⚠️ Network error: ' + err.type);
-    if (!reconnecting) { reconnecting = true; setTimeout(initPeer, 4000); }
+  peer.on('error', err => {
+    console.error('[Peer] error:', err.type);
+    setNetStatus('err', 'Network error');
+    showToast('⚠️ ' + err.type);
+
+    // Show retry popup only if user is mid-session (on a non-home screen)
+    if (myRole) {
+      triggerRetryPopup(err.type);
+    } else if (!reconnecting) {
+      reconnecting = true;
+      setTimeout(initPeer, 4000);
+    }
   });
 
   peer.on('disconnected', () => {
-    if (!peer.destroyed) { try { peer.reconnect(); } catch(e){ setTimeout(initPeer, 3000); } }
+    if (!peer.destroyed) {
+      try { peer.reconnect(); } catch(e) {
+        if (!reconnecting) {
+          reconnecting = true;
+          setTimeout(initPeer, 3000);
+        }
+      }
+    }
   });
 
-  peer.on('connection', (incomingConn) => {
+  // Incoming connection (sender role)
+  peer.on('connection', incomingConn => {
     if (myRole !== 'sender') return;
-    if (conn && conn.open) { try { incomingConn.close(); } catch(e){} return; }
+    if (conn?.open) { try { incomingConn.close(); } catch(e) {} return; }
     conn = incomingConn;
-    setupDataConnection('sender');
+    setupConn('sender');
   });
 }
 
-/* ─────────────────────────────
-   NAVIGATION
-───────────────────────────── */
+/* ═══════════════════════════════
+   NET STATUS UI
+═══════════════════════════════ */
+function setNetStatus(state, text) {
+  const dot  = document.getElementById('nsDot');
+  const txt  = document.getElementById('nsText');
+  if (dot) { dot.className = 'nb-dot ' + state; }
+  if (txt) txt.textContent = text;
+}
+
+/* ═══════════════════════════════
+   SCREENS
+═══════════════════════════════ */
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById(id)?.classList.add('active');
+  const el = document.getElementById(id);
+  if (el) el.classList.add('active');
 }
 
 function goHome() {
   if (txActive) { isCancelled = true; txActive = false; }
   stopCam();
-  if (conn) { try { conn.close(); } catch(e){} conn = null; }
+  if (conn) { try { conn.close(); } catch(e) {} conn = null; }
 
-  // Reset state
-  txQueue = []; txMeta = []; txIdx = 0; txOffset = 0;
-  isPaused = false; isCancelled = false; txActive = false;
-  rxMeta = null; rxChunks = []; rxBytes = 0; rxCancelled = false;
+  txQueue = []; txMeta = []; txIdx = 0;
+  txOffset = 0; isPaused = false; isCancelled = false;
+  rxMeta = null; rxChunks = []; rxBytes = 0;
   qrFound = false; _scanAttempts = 0;
+  myRole = null;
 
-  // Reset sender UI
+  // Clear saved role
+  try { sessionStorage.removeItem(STORAGE_KEY); } catch(e) {}
+
+  // Reset UI panels
   document.getElementById('fileQueue')?.classList.add('hidden');
   document.getElementById('dropzone')?.classList.remove('hidden');
   document.getElementById('txCard')?.classList.add('hidden');
-  document.getElementById('sHistList').innerHTML = '';
-  document.getElementById('sHistEmpty').style.display = '';
-
-  // Restore QR panel and sender layout
-  const qrPanel    = document.getElementById('qrPanel');
-  const filesPanel = document.getElementById('filesPanel');
-  const layout     = document.getElementById('senderLayout');
-  if (qrPanel) {
-    qrPanel.classList.remove('hidden', 'hiding');
-    qrPanel.style.display = '';
-  }
-  if (filesPanel) {
-    filesPanel.classList.remove('expanding');
-  }
-  if (layout) layout.classList.remove('single-col');
-
-  // Hide connected banner, restore panel header
-  document.getElementById('senderConnBanner')?.classList.add('hidden');
-  document.getElementById('filesPanelHeader')?.classList.remove('hidden');
-
-  // Reset receiver UI
+  document.getElementById('qrConnected')?.classList.add('hidden');
   document.getElementById('recvScanBody')?.classList.remove('hidden');
   document.getElementById('recvConnected')?.classList.add('hidden');
+  document.getElementById('rxCard')?.classList.add('hidden');
+  document.getElementById('sHistList').innerHTML = '';
+  document.getElementById('sHistEmpty').style.display = '';
   document.getElementById('rHistList').innerHTML = '';
   document.getElementById('rHistEmpty').style.display = '';
 
-  myRole = null;
   showScreen('sHome');
 }
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    ROLE SELECTION
-───────────────────────────── */
+═══════════════════════════════ */
 function chooseRole(role) {
   myRole = role;
+  // Remember role for retry
+  try { sessionStorage.setItem(STORAGE_KEY, role); } catch(e) {}
+
   if (role === 'sender') {
     showScreen('sSender');
     setupSenderScreen();
@@ -187,16 +229,15 @@ function chooseRole(role) {
   }
 }
 
-/* ─────────────────────────────
-   SENDER SCREEN SETUP
-───────────────────────────── */
+/* ═══════════════════════════════
+   SENDER SCREEN
+═══════════════════════════════ */
 function setupSenderScreen() {
-  if (!myId) { showToast('⚠️ Still connecting to network…'); return; }
+  if (!myId) { showToast('⚠️ Still connecting…'); return; }
   renderQR(myId);
-  const el = document.getElementById('myPeerIdDisplay');
-  if (el) el.textContent = myId;
-  const row = document.getElementById('peerIdRow');
-  if (row) row.style.display = '';
+  const strip = document.getElementById('peerIdStrip');
+  if (strip) strip.style.display = '';
+  setEl('myPeerIdDisplay', myId);
   setupDropzone();
   setConnStatus('sender', '', 'Waiting for receiver…');
 }
@@ -207,48 +248,51 @@ function copyPeerId() {
     showToast('📋 Peer ID copied!');
     const btn = document.getElementById('copyBtn');
     if (btn) {
-      btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8l3 3 7-7"/></svg>';
-      setTimeout(() => {
-        btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="9" height="9" rx="2"/><path d="M3 11V3a2 2 0 012-2h8"/></svg>';
-      }, 1800);
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
     }
-  }).catch(() => showToast('Could not copy — select manually'));
+  }).catch(() => showToast('Select the ID and copy manually'));
 }
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    QR RENDER
-───────────────────────────── */
+═══════════════════════════════ */
 function renderQR(text) {
-  const spinner = document.getElementById('qrSpinner');
-  const canvas  = document.getElementById('qrCanvas');
-  if (spinner) spinner.style.display = 'none';
-  if (canvas)  canvas.innerHTML = '';
+  const loader = document.getElementById('qrLoader');
+  const canvas = document.getElementById('qrCanvas');
+  if (loader) loader.style.display = 'none';
+  if (canvas) canvas.innerHTML = '';
   try {
     new QRCode(canvas, {
-      text: text, width: 200, height: 200,
-      colorDark: '#000000', colorLight: '#ffffff',
+      text, width: 200, height: 200,
+      colorDark: '#000', colorLight: '#fff',
       correctLevel: QRCode.CorrectLevel.M,
     });
   } catch(e) {
-    const qrBox = document.getElementById('qrBox');
-    if (qrBox) qrBox.innerHTML = `<div style="padding:1.5rem;text-align:center;font-size:.78rem;font-family:var(--mono);color:var(--text3)">QR unavailable<br/><span style="color:var(--indigo);word-break:break-all;font-size:.7rem">${esc(text)}</span></div>`;
+    if (canvas) canvas.innerHTML = `<div style="padding:1rem;text-align:center;font-size:.75rem;color:#555">QR failed<br/><b style="color:#7B2FF7;font-size:.65rem;word-break:break-all">${esc(text)}</b></div>`;
   }
 }
 
-/* ─────────────────────────────
-   DROPZONE
-───────────────────────────── */
+/* ═══════════════════════════════
+   DROP ZONE
+═══════════════════════════════ */
 function setupDropzone() {
   const dz = document.getElementById('dropzone');
   if (!dz) return;
   dz.addEventListener('dragenter', e => { e.preventDefault(); dz.classList.add('over'); });
   dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
   dz.addEventListener('dragleave', ()  => dz.classList.remove('over'));
-  dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('over'); onFilePicked(e.dataTransfer.files); });
-  dz.addEventListener('click', e => { if (e.target.tagName !== 'BUTTON') document.getElementById('fileInput').click(); });
+  dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('over');
+    onFilePicked(e.dataTransfer.files);
+  });
+  dz.addEventListener('click', e => {
+    if (e.target.tagName !== 'BUTTON') document.getElementById('fileInput').click();
+  });
 }
 
-/* Files selected — queue only, NO auto-send */
+/* File picked — QUEUE ONLY, no auto-send */
 function onFilePicked(files) {
   if (!files?.length) return;
   let added = 0;
@@ -257,22 +301,22 @@ function onFilePicked(files) {
     txMeta.push({ name: f.name, size: f.size, status: 'pending' });
     added++;
   }
-  renderFileQueue();
+  renderQueue();
   document.getElementById('dropzone')?.classList.add('hidden');
   document.getElementById('fileQueue')?.classList.remove('hidden');
-  updateSendButton();
-  showToast(`${added} file${added > 1 ? 's' : ''} added — click Send when ready`);
-  // ⚠️  NO sendNext() call here — user must press Send button
+  updateSendBtn();
+  showToast(`🎉 ${added} file${added > 1 ? 's' : ''} added — hit Send when ready!`);
+  // ⚠️ NO auto-send
 }
 
-function updateSendButton() {
+function updateSendBtn() {
   const btn = document.getElementById('btnSend');
   if (!btn) return;
   btn.disabled = txQueue.length === 0;
-  btn.title = (!conn?.open && txQueue.length > 0) ? 'Waiting for receiver to connect' : '';
+  btn.title = !conn?.open ? 'Waiting for receiver to connect' : '';
 }
 
-function renderFileQueue() {
+function renderQueue() {
   const ul    = document.getElementById('fqList');
   const count = document.getElementById('fqCount');
   const total = document.getElementById('fqTotal');
@@ -292,33 +336,34 @@ function renderFileQueue() {
         <span class="fq-size">${formatBytes(m.size)}</span>
       </div>
       <span class="fq-status ${m.status}">${m.status}</span>
-      ${m.status === 'pending' ? `<button class="fq-rm" onclick="removeFile(${i})" title="Remove">✕</button>` : ''}
+      ${m.status === 'pending' ? `<button class="fq-rm" onclick="removeFile(${i})">✕</button>` : ''}
     `;
     ul.appendChild(li);
   });
-  updateSendButton();
+  updateSendBtn();
 }
 
 function removeFile(i) {
   if (txMeta[i]?.status !== 'pending') return;
-  txQueue.splice(i, 1); txMeta.splice(i, 1);
+  txQueue.splice(i, 1);
+  txMeta.splice(i, 1);
   if (!txQueue.length) {
     document.getElementById('fileQueue')?.classList.add('hidden');
     document.getElementById('dropzone')?.classList.remove('hidden');
-  } else renderFileQueue();
+  } else renderQueue();
 }
 
 function clearQueue() {
   const pending = txMeta.filter(m => m.status === 'pending').length;
   if (!pending) return;
-  showModal('Clear queue?', `Remove all ${pending} pending file${pending > 1 ? 's' : ''} from the queue?`, () => {
+  showModal('🗑 Clear queue?', `Remove all ${pending} pending file${pending > 1 ? 's' : ''}?`, () => {
     const keep = txQueue.filter((_, i) => txMeta[i].status !== 'pending');
-    txQueue = keep;
-    txMeta  = txMeta.filter(m => m.status !== 'pending');
+    const keepM = txMeta.filter(m => m.status !== 'pending');
+    txQueue = keep; txMeta = keepM;
     if (!txQueue.length) {
       document.getElementById('fileQueue')?.classList.add('hidden');
       document.getElementById('dropzone')?.classList.remove('hidden');
-    } else renderFileQueue();
+    } else renderQueue();
   });
 }
 
@@ -333,20 +378,21 @@ function setFileStatus(i, status) {
   if (rm && status !== 'pending') rm.remove();
 }
 
-/* ─────────────────────────────
-   START SEND (button handler)
-───────────────────────────── */
+/* ═══════════════════════════════
+   START SEND (button click only)
+═══════════════════════════════ */
 function startSend() {
   if (!conn?.open) {
-    showToast('⚠️ Not connected yet — wait for receiver to scan the QR code');
+    showToast('⚠️ Receiver not connected yet! Wait for them to scan the QR.');
     return;
   }
   const pending = txMeta.filter(m => m.status === 'pending');
-  if (!pending.length) { showToast('⚠️ No files to send'); return; }
+  if (!pending.length) { showToast('⚠️ No files to send!'); return; }
   const totalSize = txQueue.reduce((s, f, i) => txMeta[i].status === 'pending' ? s + f.size : s, 0);
+
   showModal(
-    'Confirm Transfer',
-    `Send ${pending.length} file${pending.length > 1 ? 's' : ''} (${formatBytes(totalSize)}) to receiver?`,
+    '🚀 Send Files?',
+    `Send <b>${pending.length} file${pending.length > 1 ? 's' : ''}</b> (${formatBytes(totalSize)}) to the receiver?`,
     () => {
       document.getElementById('btnSend').disabled = true;
       txIdx = 0; isPaused = false; isCancelled = false; txActive = true;
@@ -355,21 +401,18 @@ function startSend() {
   );
 }
 
-/* ─────────────────────────────────────────────────────
-   CHUNKED TRANSFER LOOP
-   
-   Only CHUNK_SIZE (64 KB) bytes live in memory at once.
-   DataChannel backpressure via bufferedAmount polling.
-───────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════
+   CHUNKED TRANSFER ENGINE
+   • file.slice(offset, offset+CHUNK_SIZE) → 64KB at a time
+   • Poll bufferedAmount → pause if > BUFFER_HIGH
+   • Handles pause, cancel, errors
+═══════════════════════════════════════════════════ */
 async function sendNextFile() {
-  // Skip already-done/errored files
   while (txIdx < txQueue.length && txMeta[txIdx].status !== 'pending') txIdx++;
-
   if (txIdx >= txQueue.length || isCancelled) { finalizeSendAll(); return; }
 
   const file = txQueue[txIdx];
   const meta = txMeta[txIdx];
-
   meta.status = 'active';
   setFileStatus(txIdx, 'active');
 
@@ -379,52 +422,43 @@ async function sendNextFile() {
   }));
 
   showTxCard(file);
-  txOffset = 0; txStart = Date.now(); txTotalSent = 0;
+  txOffset = 0; txStart = Date.now();
 
-  let chunkIdx = 0;
   while (txOffset < file.size && !isCancelled) {
-    // Honour pause
+    // Pause
     while (isPaused && !isCancelled) await sleep(100);
     if (isCancelled) break;
 
-    // Backpressure: wait if DataChannel buffer is full
+    // Backpressure
     if (conn?.dataChannel) {
       while (conn.dataChannel.bufferedAmount > BUFFER_HIGH) {
-        await sleep(DRAIN_POLL_MS);
+        await sleep(DRAIN_POLL);
         if (isCancelled) break;
       }
-    } else if (chunkIdx % 64 === 0) await sleep(1); // soft throttle fallback
-
+    } else if (txOffset % (512 * 1024) < CHUNK_SIZE) {
+      await sleep(1);
+    }
     if (isCancelled) break;
 
-    // Read one chunk
     const slice = file.slice(txOffset, Math.min(txOffset + CHUNK_SIZE, file.size));
-    let buffer;
-    try {
-      buffer = await readSliceAsArrayBuffer(slice);
-    } catch(e) {
+    let buf;
+    try { buf = await readSlice(slice); } catch(e) {
       meta.status = 'error'; setFileStatus(txIdx, 'error');
       addSentHistory(file.name, file.size, true);
-      showToast(`❌ Error reading: ${file.name}`);
-      txIdx++; if (txIdx < txQueue.length) sendNextFile(); else finalizeSendAll();
+      showToast(`❌ Read error: ${file.name}`);
+      txIdx++; txActive = txIdx < txQueue.length;
+      txActive ? sendNextFile() : finalizeSendAll();
       return;
     }
-
     if (isCancelled) break;
-
-    try {
-      conn.send(buffer);
-    } catch(e) {
+    try { conn.send(buf); } catch(e) {
       meta.status = 'error'; setFileStatus(txIdx, 'error');
       showToast('❌ Connection lost during transfer');
       finalizeSendAll(); return;
     }
-
-    txOffset += buffer.byteLength;
-    txTotalSent += buffer.byteLength;
-    chunkIdx++;
+    txOffset += buf.byteLength;
     updateTxUI(txOffset, file.size);
-    if (chunkIdx % 8 === 0) await sleep(0); // yield to UI thread
+    if (Math.floor(txOffset / CHUNK_SIZE) % 8 === 0) await sleep(0);
   }
 
   if (isCancelled) {
@@ -438,9 +472,8 @@ async function sendNextFile() {
   meta.status = 'done'; setFileStatus(txIdx, 'done');
   addSentHistory(file.name, file.size, false);
   showToast(`✅ Sent: ${file.name}`);
-
   txIdx++;
-  await sleep(150);
+  await sleep(200);
   sendNextFile();
 }
 
@@ -450,17 +483,17 @@ function finalizeSendAll() {
   document.getElementById('btnSend').disabled = false;
   if (!isCancelled) {
     const done = txMeta.filter(m => m.status === 'done').length;
-    if (done > 0) showToast(`🎉 All ${done} file${done > 1 ? 's' : ''} sent!`);
+    if (done > 0) showToast(`🎉 All ${done} file${done > 1 ? 's' : ''} sent successfully!`);
   }
-  updateSendButton();
+  updateSendBtn();
 }
 
-function readSliceAsArrayBuffer(slice) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload  = e => resolve(e.target.result);
-    reader.onerror = e => reject(e.target.error);
-    reader.readAsArrayBuffer(slice);
+function readSlice(slice) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload  = e => res(e.target.result);
+    r.onerror = e => rej(e.target.error);
+    r.readAsArrayBuffer(slice);
   });
 }
 
@@ -470,20 +503,20 @@ function togglePause() {
   const btn = document.getElementById('btnPause');
   if (btn) btn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
   setFileStatus(txIdx, isPaused ? 'paused' : 'active');
-  showToast(isPaused ? '⏸ Transfer paused' : '▶ Transfer resumed');
+  showToast(isPaused ? '⏸ Paused' : '▶ Resumed');
 }
 
 function cancelTransfer() {
   if (!txActive) return;
-  showModal('Cancel transfer?', 'This will stop the current transfer. Receiver will discard partial data.', () => {
+  showModal('❌ Cancel Transfer?', 'Stop the current transfer? Receiver will discard partial data.', () => {
     isCancelled = true; isPaused = false;
     showToast('❌ Transfer cancelled');
-  });
+  }, 'Cancel Transfer');
 }
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    TX UI
-───────────────────────────── */
+═══════════════════════════════ */
 function showTxCard(file) {
   document.getElementById('txCard')?.classList.remove('hidden');
   setEl('txIco',  fileIcon(file.name));
@@ -499,24 +532,22 @@ function showTxCard(file) {
   if (pb) pb.textContent = '⏸ Pause';
 }
 
-function updateTxUI(bytesSent, total) {
-  const pct     = Math.min(100, Math.round((bytesSent / total) * 100));
+function updateTxUI(sent, total) {
+  const pct     = Math.min(100, Math.round(sent / total * 100));
   const elapsed = (Date.now() - txStart) / 1000 || 0.001;
-  const speed   = bytesSent / elapsed;
+  const speed   = sent / elapsed;
+  const rem     = speed > 0 ? (total - sent) / speed : 0;
   setEl('txPct',  pct + '%');
-  setEl('txDone', formatBytes(bytesSent) + ' / ' + formatBytes(total));
+  setEl('txDone', formatBytes(sent) + ' / ' + formatBytes(total));
   setEl('txSpd',  formatSpeed(speed));
-  setEl('txEta',  formatETA(speed > 0 ? (total - bytesSent) / speed : 0));
+  setEl('txEta',  formatETA(rem));
   const fill = document.getElementById('txFill');
   if (fill) fill.style.width = pct + '%';
 }
 
-/* ─────────────────────────────────────────────────────
-   CAMERA / QR SCANNER
-   
-   Uses setInterval at 100ms (not rAF) so jsQR (~30ms decode)
-   has breathing room. Scales video to 640px for speed.
-───────────────────────────────────────────────────── */
+/* ═══════════════════════════════
+   CAMERA / QR SCAN
+═══════════════════════════════ */
 async function startCam() {
   if (camActive) return;
   if (typeof jsQR !== 'function') {
@@ -534,10 +565,10 @@ async function startCam() {
   try {
     try {
       camStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
         audio: false,
       });
-    } catch(e1) {
+    } catch(e) {
       camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
     }
 
@@ -551,11 +582,12 @@ async function startCam() {
     camActive = true;
     document.getElementById('btnCamOn')?.classList.add('hidden');
     document.getElementById('btnCamOff')?.classList.remove('hidden');
-    if (pill) pill.textContent = 'Scanning… hold steady';
+    if (pill) pill.textContent = 'Scanning… hold steady 🎯';
 
     _scanInterval = setInterval(doScanTick, 100);
+
   } catch(err) {
-    handleCameraError(err);
+    handleCamError(err);
   }
 }
 
@@ -564,7 +596,8 @@ function waitForVideoReady(video) {
     if (video.readyState >= 2 && video.videoWidth > 0) { resolve(); return; }
     let n = 0;
     const poll = setInterval(() => {
-      if ((video.readyState >= 2 && video.videoWidth > 0) || ++n > 60) { clearInterval(poll); resolve(); }
+      n++;
+      if ((video.readyState >= 2 && video.videoWidth > 0) || n > 60) { clearInterval(poll); resolve(); }
     }, 100);
   });
 }
@@ -575,50 +608,48 @@ function doScanTick() {
   const canvas = document.getElementById('camCanvas');
   const pill   = document.getElementById('camPill');
   if (!video || !canvas) return;
-  if (video.readyState < 2 || video.videoWidth === 0) {
-    if (pill) pill.textContent = 'Waiting for camera…';
-    return;
-  }
+  if (video.readyState < 2 || video.videoWidth === 0) return;
 
-  const W = 640, H = Math.round(video.videoHeight * (640 / video.videoWidth));
+  const W = 640;
+  const H = Math.round(video.videoHeight * (W / video.videoWidth));
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
   try { ctx.drawImage(video, 0, 0, W, H); } catch(e) { return; }
-
   let imageData;
   try { imageData = ctx.getImageData(0, 0, W, H); } catch(e) { return; }
 
   _scanAttempts++;
-  if (pill && _scanAttempts % 5 === 0) pill.textContent = `Scanning… (${_scanAttempts})`;
+  if (pill && _scanAttempts % 5 === 0) pill.textContent = `Scanning… 🔍 (${_scanAttempts})`;
 
-  let code = null;
-  try { code = jsQR(imageData.data, W, H, { inversionAttempts: 'attemptBoth' }); } catch(e) { return; }
+  let code;
+  try { code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' }); }
+  catch(e) { return; }
 
   if (code?.data?.trim()) {
     qrFound = true;
-    onQRDetected(code.data.trim());
+    onQRFound(code.data.trim());
   }
 }
 
-function onQRDetected(peerId) {
+function onQRFound(peerId) {
   stopCam();
   const wrap = document.getElementById('camWrap');
   const pill = document.getElementById('camPill');
   if (wrap) wrap.classList.add('detected');
-  if (pill) { pill.textContent = '✅ QR Detected!'; pill.classList.add('ok'); }
-  showToast('📷 QR scanned! Connecting…');
+  if (pill) { pill.textContent = '✅ QR Found!'; pill.classList.add('ok'); }
+  showToast('📷 QR scanned! Connecting… 🚀');
   connectToPeer(peerId);
 }
 
-function handleCameraError(err) {
-  const msgs = {
-    NotAllowedError: '📵 Camera permission denied — enter Peer ID manually',
-    PermissionDeniedError: '📵 Camera permission denied — enter Peer ID manually',
-    NotFoundError: '❌ No camera found — enter Peer ID manually',
-    DevicesNotFoundError: '❌ No camera found — enter Peer ID manually',
-    NotReadableError: '❌ Camera is in use by another app',
+function handleCamError(err) {
+  const map = {
+    NotAllowedError: '📵 Camera permission denied',
+    PermissionDeniedError: '📵 Camera permission denied',
+    NotFoundError: '❌ No camera found',
+    DevicesNotFoundError: '❌ No camera found',
+    NotReadableError: '❌ Camera in use by another app',
   };
-  showToast(msgs[err.name] || '❌ Camera error: ' + (err.message || err.name));
+  showToast((map[err.name] || '❌ Camera error: ' + err.name) + ' — use Peer ID manually');
   document.getElementById('camDenied')?.classList.remove('hidden');
   document.getElementById('btnCamOn')?.classList.add('hidden');
 }
@@ -626,133 +657,98 @@ function handleCameraError(err) {
 function stopCam() {
   camActive = false;
   if (_scanInterval) { clearInterval(_scanInterval); _scanInterval = null; }
-  if (camStream) { camStream.getTracks().forEach(t => { try { t.stop(); } catch(e){} }); camStream = null; }
+  if (camStream) { camStream.getTracks().forEach(t => { try { t.stop(); } catch(e) {} }); camStream = null; }
   const v = document.getElementById('camVideo');
-  if (v) { try { v.srcObject = null; v.load(); } catch(e){} }
+  if (v) { try { v.srcObject = null; v.load(); } catch(e) {} }
   document.getElementById('btnCamOn')?.classList.remove('hidden');
   document.getElementById('btnCamOff')?.classList.add('hidden');
 }
 
-/* ─────────────────────────────
-   MANUAL PEER ID
-───────────────────────────── */
 function connectByPeerId() {
   const id = document.getElementById('manualPeerId')?.value?.trim();
-  if (!id) { showToast('⚠️ Enter the Peer ID first'); return; }
+  if (!id) { showToast('⚠️ Enter the Peer ID first!'); return; }
   connectToPeer(id);
 }
 
-/* ─────────────────────────────
-   CONNECT TO SENDER
-───────────────────────────── */
 function connectToPeer(senderId) {
   if (!peer?.open) { showToast('⚠️ Not connected to network yet'); return; }
   if (senderId === myId) { showToast('⚠️ Cannot connect to yourself!'); return; }
   setConnStatus('receiver', 'connecting', 'Connecting…');
   conn = peer.connect(senderId, { reliable: true, serialization: 'binary' });
-  setupDataConnection('receiver');
+  setupConn('receiver');
 }
 
-/* ─────────────────────────────
-   DATA CONNECTION SETUP
-───────────────────────────── */
-function setupDataConnection(role) {
+/* ═══════════════════════════════
+   DATA CONNECTION
+═══════════════════════════════ */
+function setupConn(role) {
   if (!conn) return;
-  conn.on('open',  ()    => onConnectionOpen(role));
-  conn.on('data',  data  => onData(data, role));
-  conn.on('close', ()    => { showToast('🔌 Connection closed'); setConnStatus(role, '', 'Disconnected'); if (role === 'sender') updateSendButton(); });
-  conn.on('error', err   => { showToast('❌ Connection error: ' + (err.message || err)); setConnStatus(role, 'failed', 'Failed'); if (txActive) { isCancelled = true; txActive = false; } });
+
+  conn.on('open', () => {
+    onConnOpen(role);
+  });
+
+  conn.on('data', data => {
+    onData(data);
+  });
+
+  conn.on('close', () => {
+    showToast('🔌 Connection closed');
+    setConnStatus(role, '', 'Disconnected');
+    if (role === 'sender') updateSendBtn();
+  });
+
+  conn.on('error', err => {
+    showToast('❌ Connection error — ' + (err.message || err));
+    setConnStatus(role, 'failed', 'Failed');
+    if (txActive) { isCancelled = true; txActive = false; }
+    // Show retry if error happens mid-session
+    if (myRole) {
+      triggerRetryPopup('connection-error');
+    }
+  });
 }
 
-/* ─────────────────────────────────────────────────────────
-   ON CONNECTION OPEN — THE KEY UI TRANSITION
-   
-   SENDER SIDE:
-     1. Animate QR panel out (fade + shrink)
-     2. After animation (350ms), hide it and collapse layout
-     3. Files panel expands with pop-in animation
-     4. Show green "Receiver Connected!" banner at top of files panel
-     5. Hide the step-number header (replaced by banner)
-   
-   RECEIVER SIDE:
-     1. Hide scanner view instantly
-     2. Show connected view with slide-up animation
-───────────────────────────────────────────────────────── */
-function onConnectionOpen(role) {
+function onConnOpen(role) {
   setConnStatus(role, 'connected', 'Connected ✓');
-
   if (role === 'sender') {
-    showToast('🔗 Receiver connected — select files and send!');
-    updateSendButton();
-
-    const qrPanel    = document.getElementById('qrPanel');
-    const filesPanel = document.getElementById('filesPanel');
-    const layout     = document.getElementById('senderLayout');
-    const banner     = document.getElementById('senderConnBanner');
-    const header     = document.getElementById('filesPanelHeader');
-
-    // Step 1: animate QR panel out
-    if (qrPanel) {
-      qrPanel.classList.add('hiding');
-
-      // Step 2: after animation completes, restructure layout
-      setTimeout(() => {
-        // Hide QR panel completely
-        qrPanel.classList.add('hidden');
-        qrPanel.classList.remove('hiding');
-
-        // Collapse grid to single column
-        if (layout) layout.classList.add('single-col');
-
-        // Pop-in files panel
-        if (filesPanel) {
-          filesPanel.classList.add('expanding');
-          setTimeout(() => filesPanel.classList.remove('expanding'), 400);
-        }
-
-        // Show connected banner, hide the step-number header
-        if (header) header.classList.add('hidden');
-        if (banner) banner.classList.remove('hidden');
-
-      }, 350); // matches panelFadeOut animation duration
-    }
+    document.getElementById('qrConnected')?.classList.remove('hidden');
+    showToast('🎉 Receiver connected! Drop files & hit Send!');
+    updateSendBtn();
   }
-
   if (role === 'receiver') {
-    // Hide scanner, show connected view
     document.getElementById('recvScanBody')?.classList.add('hidden');
     document.getElementById('recvConnected')?.classList.remove('hidden');
-    showToast('🔗 Connected — waiting for files…');
+    showToast('🎊 Connected to sender! Waiting for files…');
   }
 }
 
-/* ─────────────────────────────
-   DATA HANDLER
-───────────────────────────── */
-function onData(data, role) {
+function onData(data) {
   if (typeof data === 'string') {
-    let msg; try { msg = JSON.parse(data); } catch(e) { return; }
-    if (msg.type === 'meta')   startReceiving(msg);
-    else if (msg.type === 'done')   finalizeReceive();
+    let msg;
+    try { msg = JSON.parse(data); } catch(e) { return; }
+    if (msg.type === 'meta')   { startRx(msg); }
+    else if (msg.type === 'done')   { finalizeRx(); }
     else if (msg.type === 'cancel') {
-      rxCancelled = true; rxMeta = null; rxChunks = []; rxBytes = 0;
-      setEl('rcStatus', 'Transfer cancelled by sender');
+      rxMeta = null; rxChunks = []; rxBytes = 0;
+      setEl('rcStatus', '❌ Transfer cancelled by sender');
       document.getElementById('rxCard')?.classList.add('hidden');
       showToast('❌ Transfer cancelled by sender');
     }
-  } else {
-    if (!rxMeta || rxCancelled) return;
-    receiveChunk(data instanceof ArrayBuffer ? data : data.buffer);
+  } else if (rxMeta) {
+    const buf = data instanceof ArrayBuffer ? data : data.buffer;
+    receiveChunk(buf);
   }
 }
 
-function startReceiving(meta) {
-  rxMeta = meta; rxChunks = []; rxBytes = 0; rxStart = Date.now(); rxCancelled = false;
+function startRx(meta) {
+  rxMeta = meta; rxChunks = []; rxBytes = 0; rxStart = Date.now();
   document.getElementById('rxCard')?.classList.remove('hidden');
   setEl('rxIco',  fileIcon(meta.name));
   setEl('rxName', esc(meta.name));
   setEl('rxSz',   formatBytes(meta.size));
-  setEl('rxPct',  '0%'); setEl('rxSpd', '—'); setEl('rxEta', '—'); setEl('rxGot', '—');
+  setEl('rxPct',  '0%');
+  setEl('rxSpd',  '—'); setEl('rxEta', '—'); setEl('rxGot', '—');
   const fill = document.getElementById('rxFill');
   if (fill) fill.style.width = '0%';
   setEl('rcStatus', 'Receiving: ' + esc(meta.name));
@@ -760,22 +756,23 @@ function startReceiving(meta) {
 
 function receiveChunk(buf) {
   if (!rxMeta) return;
-  rxChunks.push(buf); rxBytes += buf.byteLength;
-  const pct = Math.min(100, Math.round((rxBytes / rxMeta.size) * 100));
+  rxChunks.push(buf);
+  rxBytes += buf.byteLength;
+  const pct     = Math.min(100, Math.round(rxBytes / rxMeta.size * 100));
   const elapsed = (Date.now() - rxStart) / 1000 || 0.001;
-  const speed = rxBytes / elapsed;
+  const speed   = rxBytes / elapsed;
   setEl('rxPct', pct + '%');
   setEl('rxGot', formatBytes(rxBytes) + ' / ' + formatBytes(rxMeta.size));
   setEl('rxSpd', formatSpeed(speed));
   setEl('rxEta', formatETA(speed > 0 ? (rxMeta.size - rxBytes) / speed : 0));
   const fill = document.getElementById('rxFill');
   if (fill) fill.style.width = pct + '%';
-  if (rxBytes >= rxMeta.size) finalizeReceive();
+  if (rxBytes >= rxMeta.size) finalizeRx();
 }
 
-function finalizeReceive() {
-  if (!rxMeta || rxCancelled) return;
-  const meta = rxMeta, chunks = rxChunks;
+function finalizeRx() {
+  if (!rxMeta) return;
+  const meta = rxMeta; const chunks = rxChunks;
   rxMeta = null; rxChunks = []; rxBytes = 0;
   setTimeout(() => {
     try {
@@ -785,29 +782,29 @@ function finalizeReceive() {
       a.href = url; a.download = meta.name;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 8000);
-      showToast('✅ Saved: ' + meta.name);
+      showToast('🎉 Saved: ' + meta.name);
       addRxHistory(meta.name, meta.size, blob);
       setEl('rcStatus', 'Waiting for more files…');
       document.getElementById('rxCard')?.classList.add('hidden');
-    } catch(e) {
-      showToast('❌ Failed to save: ' + meta.name);
-    }
+    } catch(e) { showToast('❌ Failed to save: ' + meta.name); }
   }, 0);
 }
 
-/* ─────────────────────────────
-   STATUS
-───────────────────────────── */
+/* ═══════════════════════════════
+   CONN STATUS
+═══════════════════════════════ */
 function setConnStatus(role, state, text) {
-  const dot = document.getElementById(role === 'sender' ? 'sDot' : 'rDot');
-  const txt = document.getElementById(role === 'sender' ? 'sText' : 'rText');
-  if (dot) dot.className = 'cs-dot ' + state;
+  const dotId = role === 'sender' ? 'sDot' : 'rDot';
+  const txtId = role === 'sender' ? 'sText' : 'rText';
+  const dot   = document.getElementById(dotId);
+  const txt   = document.getElementById(txtId);
+  if (dot) dot.className = 'tc-dot ' + state;
   if (txt) txt.textContent = text;
 }
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    HISTORY
-───────────────────────────── */
+═══════════════════════════════ */
 function addSentHistory(name, size, error = false) {
   const empty = document.getElementById('sHistEmpty');
   const list  = document.getElementById('sHistList');
@@ -855,45 +852,134 @@ function reDownload(idx) {
   setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
 
-/* ─────────────────────────────
-   MODAL
-───────────────────────────── */
-function showModal(title, body, onConfirm, confirmLabel = 'Confirm') {
-  setEl('modalTitle', title);
-  document.getElementById('modalBody').innerHTML = body;
-  setEl('modalConfirmBtn', confirmLabel);
-  _modalOkFn = onConfirm;
-  document.getElementById('modalOverlay').classList.remove('hidden');
+/* ═══════════════════════════════════════════════════
+   RETRY POPUP
+   • Triggered on disconnect/error during active session
+   • Reads last role from sessionStorage
+   • Shows auto-countdown then retries
+   • "Retry" re-inits PeerJS and goes back to same screen
+═══════════════════════════════════════════════════ */
+function triggerRetryPopup(reason) {
+  // Save current role for retry restoration
+  try {
+    const saved = sessionStorage.getItem(STORAGE_KEY);
+    _retryRole = saved || myRole;
+  } catch(e) {
+    _retryRole = myRole;
+  }
+
+  const overlay = document.getElementById('retryOverlay');
+  const desc    = document.getElementById('retryDesc');
+  if (!overlay) return;
+
+  // Don't show if already visible
+  if (!overlay.classList.contains('hidden')) return;
+
+  if (desc) {
+    const msgs = {
+      'peer-unavailable': 'The other device is unreachable. They may have closed the app.',
+      'connection-error': 'The connection dropped unexpectedly.',
+      'network':          'Network issue detected.',
+    };
+    desc.textContent = (msgs[reason] || 'Network disconnected.') + ' Tap Retry to reconnect!';
+  }
+
+  overlay.classList.remove('hidden');
+
+  // Start countdown
+  _retrySecsLeft = RETRY_AUTO_S;
+  updateRetryTimer();
+  _retryCountdown = setInterval(() => {
+    _retrySecsLeft--;
+    updateRetryTimer();
+    if (_retrySecsLeft <= 0) {
+      clearInterval(_retryCountdown);
+      _retryCountdown = null;
+      retryConnection();
+    }
+  }, 1000);
 }
+
+function updateRetryTimer() {
+  const el = document.getElementById('retryTimer');
+  if (el) {
+    el.textContent = _retrySecsLeft > 0
+      ? `Auto-retrying in ${_retrySecsLeft}s…`
+      : 'Retrying…';
+  }
+}
+
+function hideRetryPopup() {
+  if (_retryCountdown) { clearInterval(_retryCountdown); _retryCountdown = null; }
+  document.getElementById('retryOverlay')?.classList.add('hidden');
+}
+
+function retryConnection() {
+  hideRetryPopup();
+  showToast('🔄 Reconnecting…');
+  // Close old peer and re-init
+  if (conn) { try { conn.close(); } catch(e) {} conn = null; }
+  reconnecting = false;
+  peerInitDone = false;
+  initPeer();
+  // _retryRole is consumed inside peer.on('open') to route back
+}
+
+function retryGoHome() {
+  hideRetryPopup();
+  _retryRole = null;
+  goHome();
+}
+
+/* ═══════════════════════════════
+   MODAL
+═══════════════════════════════ */
+function showModal(title, body, onOk, okLabel = 'Let\'s Go! 🚀') {
+  setEl('modalTitle', '');
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = body;
+  document.getElementById('modalConfirmBtn').textContent = okLabel;
+  // Pick emoji from title
+  const match = title.match(/[\u{1F300}-\u{1F9FF}]/u);
+  setEl('modalEmoji', match ? match[0] : '🤔');
+  _modalOkFn = onOk;
+  document.getElementById('modalOverlay')?.classList.remove('hidden');
+}
+
 function modalConfirm() {
-  document.getElementById('modalOverlay').classList.add('hidden');
+  document.getElementById('modalOverlay')?.classList.add('hidden');
   if (_modalOkFn) { _modalOkFn(); _modalOkFn = null; }
 }
+
 function modalCancel() {
-  document.getElementById('modalOverlay').classList.add('hidden');
+  document.getElementById('modalOverlay')?.classList.add('hidden');
   _modalOkFn = null;
 }
+
 document.addEventListener('click', e => {
-  const ov = document.getElementById('modalOverlay');
-  if (e.target === ov) modalCancel();
+  if (e.target === document.getElementById('modalOverlay')) modalCancel();
 });
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    TOAST
-───────────────────────────── */
-let _toastTimer = null;
+═══════════════════════════════ */
+let _tt = null;
 function showToast(msg, ms = 3500) {
   const el = document.getElementById('toast');
   if (!el) return;
   el.textContent = msg;
   el.classList.remove('hidden');
-  clearTimeout(_toastTimer);
-  _toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
+  // Re-trigger animation
+  el.style.animation = 'none';
+  el.offsetHeight; // reflow
+  el.style.animation = '';
+  clearTimeout(_tt);
+  _tt = setTimeout(() => el.classList.add('hidden'), ms);
 }
 
-/* ─────────────────────────────
+/* ═══════════════════════════════
    HELPERS
-───────────────────────────── */
+═══════════════════════════════ */
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function setEl(id, text) {
@@ -908,42 +994,41 @@ function nowTime() {
 function formatBytes(b) {
   if (!b && b !== 0) return '—';
   if (b === 0) return '0 B';
-  const k = 1024, u = ['B','KB','MB','GB','TB'];
-  const i = Math.min(Math.floor(Math.log(b) / Math.log(k)), u.length - 1);
+  const k = 1024, u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.floor(Math.log(b) / Math.log(k)), 4);
   return parseFloat((b / Math.pow(k, i)).toFixed(i > 0 ? 2 : 0)) + ' ' + u[i];
 }
 
 function formatSpeed(bps) {
   if (!bps || bps < 0) return '—';
-  if (bps < 1024)    return bps.toFixed(0)     + ' B/s';
-  if (bps < 1048576) return (bps/1024).toFixed(1) + ' KB/s';
-  return (bps/1048576).toFixed(2) + ' MB/s';
+  if (bps < 1024) return bps.toFixed(0) + ' B/s';
+  if (bps < 1048576) return (bps / 1024).toFixed(1) + ' KB/s';
+  return (bps / 1048576).toFixed(2) + ' MB/s';
 }
 
-function formatETA(secs) {
-  if (!isFinite(secs) || secs < 0) return '—';
-  if (secs < 1)    return '<1s';
-  if (secs < 60)   return Math.ceil(secs) + 's';
-  if (secs < 3600) return Math.floor(secs/60) + 'm ' + Math.ceil(secs%60) + 's';
-  return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+function formatETA(s) {
+  if (!isFinite(s) || s < 0) return '—';
+  if (s < 1)    return '<1s';
+  if (s < 60)   return Math.ceil(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.ceil(s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
 }
 
 function fileIcon(name) {
-  const e = (name||'').split('.').pop().toLowerCase();
+  const e = (name || '').split('.').pop().toLowerCase();
   return ({
-    pdf:'📄',
-    png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',webp:'🖼️',svg:'🖼️',bmp:'🖼️',heic:'🖼️',
-    mp4:'🎬',mkv:'🎬',avi:'🎬',mov:'🎬',webm:'🎬',m4v:'🎬',flv:'🎬',
-    mp3:'🎵',wav:'🎵',flac:'🎵',ogg:'🎵',aac:'🎵',m4a:'🎵',opus:'🎵',
-    zip:'🗜️',rar:'🗜️',gz:'🗜️','7z':'🗜️',tar:'🗜️',bz2:'🗜️',xz:'🗜️',
-    doc:'📝',docx:'📝',txt:'📝',md:'📝',rtf:'📝',odt:'📝',pages:'📝',
-    xls:'📊',xlsx:'📊',csv:'📊',ods:'📊',numbers:'📊',
-    ppt:'📋',pptx:'📋',odp:'📋',key:'📋',
-    js:'💻',ts:'💻',py:'💻',html:'💻',css:'💻',json:'💻',xml:'💻',sh:'💻',
-    apk:'📱',ipa:'📱',exe:'⚙️',dmg:'💿',iso:'💿',msi:'⚙️',deb:'⚙️',
+    pdf:'📄', png:'🖼️', jpg:'🖼️', jpeg:'🖼️', gif:'🖼️', webp:'🖼️', svg:'🖼️', bmp:'🖼️', heic:'🖼️',
+    mp4:'🎬', mkv:'🎬', avi:'🎬', mov:'🎬', webm:'🎬', m4v:'🎬', flv:'🎬',
+    mp3:'🎵', wav:'🎵', flac:'🎵', ogg:'🎵', aac:'🎵', m4a:'🎵',
+    zip:'🗜️', rar:'🗜️', gz:'🗜️', '7z':'🗜️', tar:'🗜️',
+    doc:'📝', docx:'📝', txt:'📝', md:'📝', rtf:'📝', odt:'📝',
+    xls:'📊', xlsx:'📊', csv:'📊',
+    ppt:'📋', pptx:'📋',
+    js:'💻', ts:'💻', py:'💻', html:'💻', css:'💻', json:'💻',
+    apk:'📱', ipa:'📱', exe:'⚙️', dmg:'💿', iso:'💿',
   })[e] || '📎';
 }
 
 function esc(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

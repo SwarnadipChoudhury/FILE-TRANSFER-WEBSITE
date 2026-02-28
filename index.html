@@ -3,314 +3,325 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-  <title>ShareDrop — Instant P2P Transfer</title>
+  <title>ShareDrop ✈️ Instant File Transfer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=Nunito+Sans:wght@400;600;700&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="style.css"/>
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
 </head>
 <body>
-<div class="bg-canvas">
-  <div class="bg-blob b1"></div>
-  <div class="bg-blob b2"></div>
-  <div class="bg-blob b3"></div>
-  <div class="bg-noise"></div>
+
+<!-- ░░ ANIMATED BG ░░ -->
+<div class="bg-scene">
+  <div class="bg-gradient-animated"></div>
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+  <div class="blob blob-4"></div>
+  <div class="deco ds-1">📁</div>
+  <div class="deco ds-2">⚡</div>
+  <div class="deco ds-3">🌟</div>
+  <div class="deco ds-4">📱</div>
+  <div class="deco ds-5">💫</div>
+  <div class="deco ds-6">🚀</div>
+  <div class="deco ds-7">📡</div>
 </div>
+
 <div id="app">
 
-  <!-- HOME -->
+  <!-- ══════════ HOME ══════════ -->
   <div class="screen active" id="sHome">
     <div class="home-wrap">
-      <header class="brand">
-        <div class="brand-mark">
-          <svg viewBox="0 0 40 40" fill="none">
-            <rect width="40" height="40" rx="12" fill="url(#bm-g)"/>
-            <path d="M13 20h14M20 13l7 7-7 7" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-            <defs><linearGradient id="bm-g" x1="0" y1="0" x2="40" y2="40"><stop stop-color="#6366F1"/><stop offset="1" stop-color="#8B5CF6"/></linearGradient></defs>
-          </svg>
+
+      <div class="logo-block">
+        <div class="logo-orb">
+          <span class="logo-plane">✈️</span>
+          <div class="orb-pulse"></div>
         </div>
-        <div class="brand-text">
-          <span class="brand-name">ShareDrop</span>
-          <span class="brand-tagline">P2P · Zero Server · Encrypted</span>
+        <div>
+          <h1 class="logo-name">ShareDrop</h1>
+          <p class="logo-tagline">P2P · Zero Server · Encrypted</p>
         </div>
-      </header>
-      <div class="hero">
-        <h1 class="hero-title">Transfer files<br/><em>in seconds.</em></h1>
-        <p class="hero-sub">No accounts. No cloud. Files travel directly between your devices using WebRTC.</p>
       </div>
-      <div class="net-status" id="netStatus">
-        <div class="ns-dot" id="nsDot"></div>
+
+      <div class="hero-text">
+        <h2 class="hero-h">Send files<br/><em class="hero-em">instantly!</em> ✨</h2>
+        <p class="hero-p">No accounts. No cloud. Files fly directly between devices at full speed!</p>
+      </div>
+
+      <div class="net-badge" id="netBadge">
+        <span class="nb-dot" id="nsDot"></span>
         <span id="nsText">Connecting to network…</span>
       </div>
-      <div class="role-cards">
-        <button class="role-card send-card" id="btnRoleSend" onclick="chooseRole('sender')" disabled>
-          <div class="rc-accent"></div>
-          <div class="rc-icon send-icon">
-            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 3L12.5 11M21 3l-6.5 18-2.5-7.5L3.5 11 21 3z"/></svg>
-          </div>
-          <div class="rc-body">
-            <span class="rc-title">Send Files</span>
-            <span class="rc-desc">Show your QR code — receiver scans to connect</span>
-          </div>
-          <svg class="rc-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l5 5-5 5"/></svg>
+
+      <div class="role-buttons">
+        <button class="role-btn send-role" id="btnRoleSend" onclick="chooseRole('sender')" disabled>
+          <div class="rb-glow"></div>
+          <div class="rb-icon">📤</div>
+          <div class="rb-label">Send Files</div>
+          <div class="rb-sub">Show your QR code</div>
+          <div class="rb-arrow">→</div>
         </button>
-        <button class="role-card recv-card" id="btnRoleRecv" onclick="chooseRole('receiver')" disabled>
-          <div class="rc-accent"></div>
-          <div class="rc-icon recv-icon">
-            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="21" x2="12" y2="3"/><path d="M21 18.1A5 5 0 0019 9h-1.3A8 8 0 102 16.3"/></svg>
-          </div>
-          <div class="rc-body">
-            <span class="rc-title">Receive Files</span>
-            <span class="rc-desc">Scan sender's QR — files arrive automatically</span>
-          </div>
-          <svg class="rc-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3l5 5-5 5"/></svg>
+
+        <button class="role-btn recv-role" id="btnRoleRecv" onclick="chooseRole('receiver')" disabled>
+          <div class="rb-glow"></div>
+          <div class="rb-icon">📥</div>
+          <div class="rb-label">Receive Files</div>
+          <div class="rb-sub">Scan sender's QR</div>
+          <div class="rb-arrow">→</div>
         </button>
       </div>
-      <div class="home-info">
-        <span id="devLabel">Detecting device…</span>
-        <span class="dot-sep">·</span>
-        <span>End-to-end encrypted</span>
-        <span class="dot-sep">·</span>
-        <span>Any file size</span>
+
+      <div class="home-chips">
+        <span class="home-chip" id="devLabel">🔍 Detecting…</span>
+        <span class="home-chip">🔒 E2E Encrypted</span>
+        <span class="home-chip">♾️ Any File Size</span>
       </div>
+
     </div>
   </div>
 
-  <!-- SENDER -->
+  <!-- ══════════ SENDER ══════════ -->
   <div class="screen" id="sSender">
+
     <div class="topbar">
-      <button class="back-btn" onclick="goHome()">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M16 10H4M9 5l-5 5 5 5"/></svg>
-      </button>
-      <div class="tb-center">
-        <span class="role-pill send-pill">Send</span>
-        <span class="tb-title">File Sender</span>
-      </div>
-      <div class="conn-status">
-        <div class="cs-dot" id="sDot"></div>
+      <button class="back-btn" onclick="goHome()">← Back</button>
+      <span class="tb-badge send-badge">📤 Sender</span>
+      <div class="tb-conn" id="senderChip">
+        <span class="tc-dot" id="sDot"></span>
         <span id="sText">Waiting…</span>
       </div>
     </div>
 
-    <div class="sender-layout" id="senderLayout">
+    <div class="sender-grid">
 
-      <!-- QR Panel -->
-      <div class="panel qr-panel" id="qrPanel">
-        <div class="panel-header">
-          <div class="step-num">1</div>
+      <!-- QR Card -->
+      <div class="glass-card">
+        <div class="gc-header">
+          <span class="step-ball">1</span>
           <div>
-            <div class="panel-title">Receiver scans this QR</div>
-            <div class="panel-sub">Connection happens automatically</div>
+            <div class="gc-title">Receiver scans this QR 📷</div>
+            <div class="gc-sub">Auto-connects instantly!</div>
           </div>
         </div>
-        <div class="qr-box" id="qrBox">
-          <div class="qr-spinner" id="qrSpinner">
-            <div class="spinner"></div>
-            <span>Generating…</span>
+
+        <div class="qr-stage" id="qrFrame">
+          <div class="qr-loading" id="qrLoader">
+            <div class="dot-loader"><span></span><span></span><span></span></div>
+            <p>Generating QR…</p>
           </div>
           <div id="qrCanvas"></div>
         </div>
-        <div class="peer-id-row" id="peerIdRow" style="display:none">
-          <span class="pid-label">Peer ID</span>
+
+        <div class="pid-row" id="peerIdStrip" style="display:none">
+          <span class="pid-tag">ID</span>
           <span class="pid-val" id="myPeerIdDisplay">—</span>
-          <button class="copy-btn" onclick="copyPeerId()" id="copyBtn" title="Copy ID">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="9" height="9" rx="2"/><path d="M3 11V3a2 2 0 012-2h8"/></svg>
+          <button class="pid-copy-btn" onclick="copyPeerId()" id="copyBtn">📋 Copy</button>
+        </div>
+
+        <div class="connected-burst hidden" id="qrConnected">
+          🎉 Receiver Connected!
+        </div>
+      </div>
+
+      <!-- Files Card -->
+      <div class="glass-card">
+        <div class="gc-header">
+          <span class="step-ball">2</span>
+          <div>
+            <div class="gc-title">Add files to send 📂</div>
+            <div class="gc-sub">Select first, hit Send when ready</div>
+          </div>
+        </div>
+
+        <div class="drop-zone" id="dropzone">
+          <input type="file" id="fileInput" multiple style="display:none" onchange="onFilePicked(this.files)"/>
+          <div class="dz-inner">
+            <div class="dz-orbit">
+              <span class="dz-center-icon">📎</span>
+              <div class="dz-ring-1"></div>
+              <div class="dz-ring-2"></div>
+            </div>
+            <p class="dz-big">Drop files here!</p>
+            <p class="dz-small">Any type · Any size</p>
+          </div>
+          <button class="candy-btn purple-candy" onclick="document.getElementById('fileInput').click()">
+            📂 Browse Files
           </button>
         </div>
-      </div>
 
-      <!-- Files Panel -->
-      <div class="panel files-panel" id="filesPanel">
-        <div class="panel-header" id="filesPanelHeader">
-          <div class="step-num" id="filesStepNum">2</div>
-          <div>
-            <div class="panel-title">Select files to send</div>
-            <div class="panel-sub">Drag, drop, or browse — transfer starts on your command</div>
-          </div>
-        </div>
-
-        <!-- Connected banner (replaces header after connect) -->
-        <div class="sender-conn-banner hidden" id="senderConnBanner">
-          <div class="scb-icon">
-            <svg viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </div>
-          <div class="scb-text">
-            <span class="scb-title">Receiver Connected!</span>
-            <span class="scb-sub">Select files below and tap Send</span>
-          </div>
-        </div>
-
-        <!-- Dropzone -->
-        <div class="dropzone" id="dropzone">
-          <input type="file" id="fileInput" multiple style="display:none" onchange="onFilePicked(this.files)"/>
-          <div class="dz-icon">
-            <svg viewBox="0 0 48 48" fill="none">
-              <circle cx="24" cy="24" r="22" stroke="url(#dz-g)" stroke-width="1.5" stroke-dasharray="4 3"/>
-              <path d="M24 32V18M17 25l7-7 7 7" stroke="url(#dz-g)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              <defs><linearGradient id="dz-g" x1="2" y1="2" x2="46" y2="46"><stop stop-color="#6366F1"/><stop offset="1" stop-color="#8B5CF6"/></linearGradient></defs>
-            </svg>
-          </div>
-          <p class="dz-title">Drop files here</p>
-          <p class="dz-hint">or click to browse · any type · any size</p>
-          <button class="btn-outline sm" onclick="document.getElementById('fileInput').click()">Browse Files</button>
-        </div>
-
-        <!-- Queue -->
         <div class="file-queue hidden" id="fileQueue">
-          <div class="fq-header">
-            <div class="fq-meta">
+          <div class="fq-bar">
+            <div class="fq-left">
               <span class="fq-count" id="fqCount">0 files</span>
-              <span class="fq-total" id="fqTotal"></span>
+              <span class="fq-sz" id="fqTotal"></span>
             </div>
-            <button class="btn-xs" onclick="document.getElementById('fileInput').click()">+ Add more</button>
+            <button class="mini-pill" onclick="document.getElementById('fileInput').click()">+ Add more</button>
           </div>
           <ul class="fq-list" id="fqList"></ul>
-          <div class="fq-actions">
-            <button class="btn-ghost" onclick="clearQueue()">Clear all</button>
-            <button class="btn-primary" id="btnSend" onclick="startSend()">
-              <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 9h12M9 3l6 6-6 6"/></svg>
-              Send Files
-            </button>
+          <div class="fq-footer">
+            <button class="candy-btn ghost-candy sm" onclick="clearQueue()">🗑 Clear</button>
+            <button class="candy-btn green-candy" id="btnSend" onclick="startSend()">🚀 Send Files!</button>
           </div>
         </div>
 
-        <!-- Transfer card -->
         <div class="xfer-card hidden" id="txCard">
-          <div class="xfer-file-info">
-            <div class="xfi-icon" id="txIco">📄</div>
-            <div class="xfi-details">
-              <div class="xfi-name" id="txName">—</div>
-              <div class="xfi-size" id="txSz">—</div>
+          <div class="xfer-top">
+            <span class="xfer-ico" id="txIco">📄</span>
+            <div class="xfer-meta">
+              <div class="xfer-filename" id="txName">—</div>
+              <div class="xfer-filesize" id="txSz">—</div>
             </div>
-            <div class="xfi-pct" id="txPct">0%</div>
+            <span class="xfer-percent" id="txPct">0%</span>
           </div>
-          <div class="progress-track"><div class="progress-fill" id="txFill"></div></div>
-          <div class="xfer-stats">
-            <div class="stat-cell"><div class="stat-label">Speed</div><div class="stat-val" id="txSpd">—</div></div>
-            <div class="stat-cell"><div class="stat-label">Remaining</div><div class="stat-val" id="txEta">—</div></div>
-            <div class="stat-cell"><div class="stat-label">Transferred</div><div class="stat-val" id="txDone">—</div></div>
+          <div class="candy-progress">
+            <div class="candy-fill" id="txFill"></div>
           </div>
-          <div class="xfer-controls">
-            <button class="btn-ghost sm" id="btnPause" onclick="togglePause()">⏸ Pause</button>
-            <button class="btn-ghost sm danger" onclick="cancelTransfer()">✕ Cancel</button>
+          <div class="stat-row">
+            <div class="stat-pill"><span>Speed</span><strong id="txSpd">—</strong></div>
+            <div class="stat-pill"><span>ETA</span><strong id="txEta">—</strong></div>
+            <div class="stat-pill"><span>Done</span><strong id="txDone">—</strong></div>
+          </div>
+          <div class="xfer-buttons">
+            <button class="candy-btn yellow-candy sm" id="btnPause" onclick="togglePause()">⏸ Pause</button>
+            <button class="candy-btn red-candy sm" onclick="cancelTransfer()">✕ Cancel</button>
           </div>
         </div>
+
       </div>
     </div>
 
-    <div class="history-section">
-      <div class="hist-header">Transfer History</div>
-      <div class="hist-empty" id="sHistEmpty">No transfers yet</div>
+    <div class="hist-section">
+      <div class="hist-head">📋 Transfer History</div>
+      <div class="hist-empty" id="sHistEmpty">Nothing sent yet! 👀</div>
       <ul class="hist-list" id="sHistList"></ul>
     </div>
+
   </div>
 
-  <!-- RECEIVER -->
+  <!-- ══════════ RECEIVER ══════════ -->
   <div class="screen" id="sReceiver">
+
     <div class="topbar">
-      <button class="back-btn" onclick="goHome()">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M16 10H4M9 5l-5 5 5 5"/></svg>
-      </button>
-      <div class="tb-center">
-        <span class="role-pill recv-pill">Receive</span>
-        <span class="tb-title">File Receiver</span>
-      </div>
-      <div class="conn-status">
-        <div class="cs-dot" id="rDot"></div>
-        <span id="rText">Not connected</span>
+      <button class="back-btn" onclick="goHome()">← Back</button>
+      <span class="tb-badge recv-badge">📥 Receiver</span>
+      <div class="tb-conn" id="receiverChip">
+        <span class="tc-dot" id="rDot"></span>
+        <span id="rText">Scan QR…</span>
       </div>
     </div>
 
-    <!-- Scanner View -->
-    <div class="recv-scan-view" id="recvScanBody">
-      <div class="scanner-card">
-        <div class="scanner-header">
-          <div class="sh-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="16" y="3" width="5" height="5" rx="1"/><rect x="3" y="16" width="5" height="5" rx="1"/><path d="M16 16h5v5M16 16v5M16 16h5"/></svg>
-          </div>
-          <div>
-            <div class="sh-title">Point at sender's QR code</div>
-            <div class="sh-sub">Auto-connects when detected</div>
-          </div>
+    <div class="recv-scan-wrap" id="recvScanBody">
+      <div class="glass-card scanner-card">
+
+        <div class="scan-hero">
+          <div class="scan-icon-orb">📷</div>
+          <h3 class="scan-title">Scan Sender's QR Code</h3>
+          <p class="scan-sub">Point camera at QR — auto-connects! 🎯</p>
         </div>
+
         <div class="cam-viewport" id="camWrap">
           <video id="camVideo" autoplay playsinline muted></video>
           <canvas id="camCanvas" style="display:none"></canvas>
-          <div class="scan-frame">
-            <i class="sf-corner sf-tl"></i><i class="sf-corner sf-tr"></i>
-            <i class="sf-corner sf-bl"></i><i class="sf-corner sf-br"></i>
-            <div class="scan-laser" id="scanLaser"></div>
+          <div class="cam-corners">
+            <i class="cc cc-tl"></i><i class="cc cc-tr"></i>
+            <i class="cc cc-bl"></i><i class="cc cc-br"></i>
+            <div class="cam-scan-line" id="scanLaser"></div>
           </div>
-          <div class="cam-status-pill" id="camPill">Tap to start camera</div>
+          <div class="cam-status" id="camPill">Tap Start Camera ↓</div>
         </div>
-        <div class="scanner-buttons">
-          <button class="btn-primary full" id="btnCamOn" onclick="startCam()">
-            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19.5 7.5l-5.5 3.5 5.5 3.5V7.5z"/><rect x="1" y="5" width="13" height="12" rx="2"/></svg>
-            Start Camera
-          </button>
-          <button class="btn-outline hidden" id="btnCamOff" onclick="stopCam()">Stop Camera</button>
+
+        <div class="scan-btns">
+          <button class="candy-btn purple-candy full-w" id="btnCamOn" onclick="startCam()">📸 Start Camera</button>
+          <button class="candy-btn ghost-candy hidden" id="btnCamOff" onclick="stopCam()">Stop Camera</button>
         </div>
-        <div class="cam-fallback hidden" id="camDenied">
-          <div class="fallback-msg">
-            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10" cy="10" r="9"/><path d="M10 6v4.5l3 3"/></svg>
-            Camera unavailable. Enter the sender's Peer ID manually:
-          </div>
-          <div class="manual-input-row">
-            <input type="text" id="manualPeerId" class="peer-input" placeholder="Paste Peer ID here…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"/>
-            <button class="btn-primary" onclick="connectByPeerId()">Connect</button>
+
+        <div class="fallback-section hidden" id="camDenied">
+          <p class="fallback-note">⚠️ Camera unavailable — enter Peer ID manually:</p>
+          <div class="fallback-row">
+            <input type="text" id="manualPeerId" class="cartoon-input" placeholder="Paste Peer ID here…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"/>
+            <button class="candy-btn green-candy" onclick="connectByPeerId()">Connect!</button>
           </div>
         </div>
+
       </div>
     </div>
 
-    <!-- Connected View -->
-    <div class="recv-connected-view hidden" id="recvConnected">
-      <div class="conn-banner">
-        <div class="cb-check">
-          <svg viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </div>
+    <div class="recv-connected-wrap hidden" id="recvConnected">
+      <div class="connected-banner">
+        <div class="cb-icon">🎊</div>
         <div>
-          <div class="cb-title">Connected to Sender</div>
+          <div class="cb-title">Connected to Sender!</div>
           <div class="cb-sub" id="rcStatus">Waiting for files…</div>
         </div>
       </div>
+
       <div class="xfer-card hidden" id="rxCard">
-        <div class="xfer-file-info">
-          <div class="xfi-icon" id="rxIco">📄</div>
-          <div class="xfi-details">
-            <div class="xfi-name" id="rxName">—</div>
-            <div class="xfi-size" id="rxSz">—</div>
+        <div class="xfer-top">
+          <span class="xfer-ico" id="rxIco">📄</span>
+          <div class="xfer-meta">
+            <div class="xfer-filename" id="rxName">—</div>
+            <div class="xfer-filesize" id="rxSz">—</div>
           </div>
-          <div class="xfi-pct" id="rxPct">0%</div>
+          <span class="xfer-percent" id="rxPct">0%</span>
         </div>
-        <div class="progress-track"><div class="progress-fill" id="rxFill"></div></div>
-        <div class="xfer-stats">
-          <div class="stat-cell"><div class="stat-label">Speed</div><div class="stat-val" id="rxSpd">—</div></div>
-          <div class="stat-cell"><div class="stat-label">Remaining</div><div class="stat-val" id="rxEta">—</div></div>
-          <div class="stat-cell"><div class="stat-label">Received</div><div class="stat-val" id="rxGot">—</div></div>
+        <div class="candy-progress">
+          <div class="candy-fill" id="rxFill"></div>
+        </div>
+        <div class="stat-row">
+          <div class="stat-pill"><span>Speed</span><strong id="rxSpd">—</strong></div>
+          <div class="stat-pill"><span>ETA</span><strong id="rxEta">—</strong></div>
+          <div class="stat-pill"><span>Got</span><strong id="rxGot">—</strong></div>
         </div>
       </div>
-      <div class="history-section">
-        <div class="hist-header">Received Files</div>
-        <div class="hist-empty" id="rHistEmpty">Files will appear here</div>
+
+      <div class="hist-section">
+        <div class="hist-head">📥 Received Files</div>
+        <div class="hist-empty" id="rHistEmpty">Files will land here! 🛬</div>
         <ul class="hist-list" id="rHistList"></ul>
       </div>
     </div>
+
   </div>
 
 </div>
 
+<!-- TOAST -->
 <div class="toast hidden" id="toast"></div>
 
+<!-- CONFIRM MODAL -->
 <div class="modal-overlay hidden" id="modalOverlay">
-  <div class="modal-box">
+  <div class="modal-card">
+    <div class="modal-icon" id="modalEmoji">🤔</div>
     <div class="modal-title" id="modalTitle">Confirm</div>
     <div class="modal-body" id="modalBody"></div>
     <div class="modal-actions">
-      <button class="btn-ghost" onclick="modalCancel()">Cancel</button>
-      <button class="btn-primary" id="modalConfirmBtn" onclick="modalConfirm()">Confirm</button>
+      <button class="candy-btn ghost-candy" onclick="modalCancel()">Cancel</button>
+      <button class="candy-btn green-candy" id="modalConfirmBtn" onclick="modalConfirm()">Let's Go! 🚀</button>
+    </div>
+  </div>
+</div>
+
+<!-- RETRY POPUP -->
+<div class="retry-overlay hidden" id="retryOverlay">
+  <div class="retry-card">
+    <div class="no-wifi-anim">
+      <div class="nw-arc nw-arc1"></div>
+      <div class="nw-arc nw-arc2"></div>
+      <div class="nw-arc nw-arc3"></div>
+      <div class="nw-dot"></div>
+      <div class="nw-cross">✕</div>
+    </div>
+    <h3 class="retry-title">Oops! Connection Lost 😢</h3>
+    <p class="retry-msg" id="retryDesc">Network disconnected. We'll get you back!</p>
+    <div class="retry-countdown" id="retryTimer"></div>
+    <div class="retry-actions">
+      <button class="candy-btn green-candy big-candy" id="retryBtn" onclick="retryConnection()">
+        🔄 Retry Now
+      </button>
+      <button class="candy-btn ghost-candy" onclick="retryGoHome()">🏠 Go Home</button>
     </div>
   </div>
 </div>
