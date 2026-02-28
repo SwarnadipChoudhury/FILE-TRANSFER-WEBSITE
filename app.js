@@ -133,12 +133,13 @@ function showScreen(id) {
 }
 
 function goHome() {
-  stopCam();
+  stopCam(); // also clears _scanInterval inside
   if (conn) { try { conn.close(); } catch(e){} conn = null; }
   // Reset sender state
   txQueue = []; txMeta = []; txIdx = 0;
   // Reset receiver state
-  rxMeta = null; rxChunks = []; rxBytes = 0; qrFound = false;
+  rxMeta = null; rxChunks = []; rxBytes = 0;
+  qrFound = false; _scanAttempts = 0;
   myRole = null;
   showScreen('sHome');
 }
@@ -209,128 +210,249 @@ function renderQR(text) {
   }
 }
 
-/* ═══════════════════════════════
-   RECEIVER — CAMERA / QR SCAN
-═══════════════════════════════ */
+/* ═══════════════════════════════════════════════════
+   RECEIVER — CAMERA / QR SCAN  (bulletproof rewrite)
+   
+   FIX SUMMARY:
+   1. jsQR check — verify library loaded before scanning
+   2. Use setInterval (10fps) NOT rAF — rAF fires too fast,
+      jsQR decode is slow (~30ms), causing frame drops + lock
+   3. Wait for video.readyState === 4 (HAVE_ENOUGH_DATA)
+      AND videoWidth > 0 before first decode attempt
+   4. Throttle decode to every 100ms — gives jsQR time to finish
+   5. Scale canvas DOWN to 640px wide — smaller = faster decode
+   6. Try both rear and front cameras as fallback
+   7. Add visible debug counter so user knows scanning is active
+═══════════════════════════════════════════════════ */
+
+let _scanInterval = null;  // setInterval handle (replaces rAF)
+let _lastScanTime = 0;     // throttle timestamp
+let _scanAttempts = 0;     // counter for debug pill
+
 async function startCam() {
   if (camActive) return;
+
+  // ── Safety check: is jsQR loaded? ──────────────────
+  if (typeof jsQR !== 'function') {
+    showToast('❌ QR scanner library not loaded. Check internet connection.');
+    document.getElementById('camDenied').classList.remove('hidden');
+    document.getElementById('btnCamOn').classList.add('hidden');
+    console.error('[Camera] jsQR is not loaded!');
+    return;
+  }
 
   const video = document.getElementById('camVideo');
   const pill  = document.getElementById('camPill');
 
+  // Reset state
+  qrFound       = false;
+  _scanAttempts = 0;
+
+  // Update pill
+  if (pill) { pill.textContent = 'Requesting camera…'; pill.classList.remove('ok'); }
+
   try {
-    // Prefer rear camera on mobile
-    camStream = await navigator.mediaDevices.getUserMedia({
+    // ── Strategy 1: rear camera (ideal for mobile) ──
+    let constraints = {
       video: {
-        facingMode: { ideal: 'environment' },
-        width:  { ideal: 1280 },
-        height: { ideal: 720 },
-      }
-    });
+        facingMode:  { ideal: 'environment' },
+        width:       { min: 320, ideal: 1280, max: 1920 },
+        height:      { min: 240, ideal: 720,  max: 1080 },
+      },
+      audio: false,
+    };
 
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e1) {
+      console.warn('[Camera] rear camera failed, trying any camera:', e1.message);
+      // ── Strategy 2: any available camera ──
+      camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
+
+    // Attach stream to video element
     video.srcObject = camStream;
-    video.play().catch(() => {});
+    video.setAttribute('playsinline', 'true');  // iOS Safari requirement
+    video.setAttribute('muted', 'true');
+    video.muted = true;
 
-    await new Promise((res) => {
-      video.addEventListener('loadedmetadata', res, { once: true });
-      setTimeout(res, 2000); // fallback timeout
-    });
+    // ── Wait for video to actually have pixels ──────
+    // We wait for readyState >= 2 (HAVE_CURRENT_DATA) AND videoWidth > 0
+    // with a polling approach instead of event listeners (more reliable)
+    await waitForVideoReady(video);
 
+    // Force play (needed on some browsers)
+    try { await video.play(); } catch(e) { /* autoplay may already be going */ }
+
+    // ── Mark camera as active ──
     camActive = true;
     document.getElementById('btnCamOn').classList.add('hidden');
     document.getElementById('btnCamOff').classList.remove('hidden');
-    if (pill) pill.textContent = 'Scanning… point at QR code';
+    if (pill) pill.textContent = 'Scanning… hold steady';
 
-    // Start decode loop
-    camLoop();
+    console.log('[Camera] ready — videoWidth:', video.videoWidth, 'videoHeight:', video.videoHeight);
+
+    // ── Start decode loop using setInterval at 10fps ──
+    // Using setInterval instead of requestAnimationFrame because:
+    // - rAF fires at 60fps, jsQR takes ~30ms → queue backs up
+    // - setInterval at 100ms gives jsQR room to breathe
+    // - Result: reliable detection instead of missed frames
+    _scanInterval = setInterval(doScanTick, 100);
 
   } catch(err) {
-    console.error('[Camera]', err.name, err.message);
-
-    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-      document.getElementById('camDenied').classList.remove('hidden');
-      document.getElementById('btnCamOn').classList.add('hidden');
-      showToast('📵 Camera denied. Use manual Peer ID input.');
-    } else if (err.name === 'NotFoundError') {
-      document.getElementById('camDenied').classList.remove('hidden');
-      document.getElementById('btnCamOn').classList.add('hidden');
-      showToast('❌ No camera found. Enter Peer ID manually.');
-    } else {
-      showToast('❌ Camera error: ' + err.message);
-    }
+    console.error('[Camera] getUserMedia failed:', err.name, err.message);
+    showCameraError(err);
   }
 }
 
-function stopCam() {
-  camActive = false;
-  if (camRAF) { cancelAnimationFrame(camRAF); camRAF = null; }
-  if (camStream) {
-    camStream.getTracks().forEach(t => t.stop());
-    camStream = null;
-  }
-  const v = document.getElementById('camVideo');
-  if (v) v.srcObject = null;
-  document.getElementById('btnCamOn')?.classList.remove('hidden');
-  document.getElementById('btnCamOff')?.classList.add('hidden');
+/* Polls until video element has real pixel data */
+function waitForVideoReady(video) {
+  return new Promise((resolve) => {
+    // Already ready?
+    if (video.readyState >= 2 && video.videoWidth > 0) { resolve(); return; }
+
+    let attempts = 0;
+    const poll = setInterval(() => {
+      attempts++;
+      if (video.readyState >= 2 && video.videoWidth > 0) {
+        clearInterval(poll);
+        resolve();
+      } else if (attempts > 60) {  // 6 second timeout
+        clearInterval(poll);
+        resolve(); // resolve anyway, let decode handle it
+      }
+    }, 100);
+  });
 }
 
-function camLoop() {
-  camRAF = requestAnimationFrame(camFrame);
-}
-
-function camFrame() {
+/* Called every 100ms by setInterval — does one QR decode attempt */
+function doScanTick() {
   if (!camActive || qrFound) return;
 
   const video  = document.getElementById('camVideo');
   const canvas = document.getElementById('camCanvas');
+  const pill   = document.getElementById('camPill');
   if (!video || !canvas) return;
 
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-  // Only process when video has real pixels
-  if (video.readyState < 2 || video.videoWidth === 0) {
-    camLoop(); return;
+  // Skip if video not ready yet
+  if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+    if (pill) pill.textContent = 'Waiting for camera…';
+    return;
   }
 
-  canvas.width  = video.videoWidth;
-  canvas.height = video.videoHeight;
-  ctx.drawImage(video, 0, 0);
+  // ── Scale canvas to 640px wide for faster decode ──
+  // jsQR works best on images 400-800px wide
+  // Full 1280px images are slower and rarely help detection
+  const SCAN_WIDTH  = 640;
+  const scale       = SCAN_WIDTH / video.videoWidth;
+  const SCAN_HEIGHT = Math.round(video.videoHeight * scale);
+
+  canvas.width  = SCAN_WIDTH;
+  canvas.height = SCAN_HEIGHT;
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+
+  try {
+    ctx.drawImage(video, 0, 0, SCAN_WIDTH, SCAN_HEIGHT);
+  } catch(e) {
+    console.warn('[Scan] drawImage failed:', e.message);
+    return;
+  }
 
   let imageData;
   try {
-    imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    imageData = ctx.getImageData(0, 0, SCAN_WIDTH, SCAN_HEIGHT);
   } catch(e) {
-    camLoop(); return;
+    // This happens on some browsers if canvas is tainted (CORS)
+    console.warn('[Scan] getImageData failed:', e.message);
+    return;
   }
 
-  // jsQR decode — returns null if no QR, or {data: '...'} if found
-  const code = jsQR(imageData.data, imageData.width, imageData.height, {
-    inversionAttempts: 'attemptBoth', // try both normal + inverted
-  });
+  // Update pill with attempt counter so user knows it's working
+  _scanAttempts++;
+  if (pill && _scanAttempts % 5 === 0) {
+    pill.textContent = `Scanning… (${_scanAttempts} frames)`;
+  }
 
-  if (code && code.data && code.data.trim()) {
+  // ── jsQR decode ──────────────────────────────────
+  let code = null;
+  try {
+    code = jsQR(imageData.data, imageData.width, imageData.height, {
+      inversionAttempts: 'attemptBoth',  // handle both dark-on-light and light-on-dark QR
+    });
+  } catch(e) {
+    console.warn('[Scan] jsQR threw:', e.message);
+    return;
+  }
+
+  if (code && code.data && code.data.trim().length > 0) {
+    const decoded = code.data.trim();
+    console.log('[QR] FOUND after', _scanAttempts, 'frames — data:', decoded);
     qrFound = true;
-    onQRDetected(code.data.trim());
-  } else {
-    camLoop(); // keep scanning
+    onQRDetected(decoded);
   }
+  // else: no QR this frame, interval will try again in 100ms
 }
 
 function onQRDetected(peerId) {
-  console.log('[QR] detected peer ID:', peerId);
+  // Stop scanning immediately
+  stopCam();
 
-  // Visual feedback
+  // Visual feedback on the camera viewport
   const wrap = document.getElementById('camWrap');
   const pill = document.getElementById('camPill');
   if (wrap) wrap.classList.add('detected');
-  if (pill) { pill.textContent = '✅ QR detected!'; pill.classList.add('ok'); }
+  if (pill) { pill.textContent = '✅ QR Detected!'; pill.classList.add('ok'); }
 
-  showToast('📷 QR scanned! Connecting…');
-  stopCam();
+  showToast('📷 QR scanned! Connecting to sender…');
 
-  // Connect to sender using the scanned Peer ID
+  // Connect using the scanned Peer ID
   connectToPeer(peerId);
 }
+
+function showCameraError(err) {
+  const denied = document.getElementById('camDenied');
+  const btnOn  = document.getElementById('btnCamOn');
+
+  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+    showToast('📵 Camera permission denied. Enter Peer ID manually.');
+  } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+    showToast('❌ No camera found. Enter Peer ID manually.');
+  } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+    showToast('❌ Camera in use by another app. Close it and try again.');
+  } else if (err.name === 'OverconstrainedError') {
+    showToast('❌ Camera constraints not supported. Enter Peer ID manually.');
+  } else {
+    showToast('❌ Camera error: ' + (err.message || err.name));
+  }
+
+  if (denied) denied.classList.remove('hidden');
+  if (btnOn)  btnOn.classList.add('hidden');
+}
+
+function stopCam() {
+  camActive = false;
+
+  // Stop interval (replaces old rAF cancel)
+  if (_scanInterval) { clearInterval(_scanInterval); _scanInterval = null; }
+  if (camRAF)        { cancelAnimationFrame(camRAF); camRAF = null; }
+
+  // Stop all camera tracks
+  if (camStream) {
+    camStream.getTracks().forEach(t => { try { t.stop(); } catch(e){} });
+    camStream = null;
+  }
+
+  const v = document.getElementById('camVideo');
+  if (v) { v.srcObject = null; v.load(); }
+
+  document.getElementById('btnCamOn')?.classList.remove('hidden');
+  document.getElementById('btnCamOff')?.classList.add('hidden');
+}
+
+// Legacy aliases — keep camLoop/camFrame refs alive in case called elsewhere
+function camLoop() { /* replaced by setInterval in startCam */ }
+function camFrame() { /* replaced by doScanTick */ }
 
 /* ═══════════════════════════════
    MANUAL PEER ID (fallback)
