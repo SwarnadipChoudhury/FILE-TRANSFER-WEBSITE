@@ -13,7 +13,7 @@
 </head>
 <body>
 
-<!-- ░░ ANIMATED BG ░░ -->
+<!-- ░░ ANIMATED BACKGROUND ░░ -->
 <div class="bg-scene">
   <div class="bg-gradient-animated"></div>
   <div class="blob blob-1"></div>
@@ -29,7 +29,7 @@
   <div class="deco ds-7">📡</div>
 </div>
 
-<!-- SUCCESS FLASH OVERLAY -->
+<!-- ░░ SUCCESS FLASH OVERLAY ░░ -->
 <div class="success-flash hidden" id="successFlash">
   <div class="sf-inner">
     <div class="sf-checkmark">
@@ -96,13 +96,13 @@
     </div>
   </div>
 
-  <!-- ══════════ SENDER ══════════ -->
+  <!-- ══════════ SENDER SCREEN ══════════ -->
   <div class="screen" id="sSender">
 
     <div class="topbar">
       <button class="back-btn" onclick="goHome()">← Back</button>
       <span class="tb-badge send-badge">📤 Sender</span>
-      <div class="tb-conn" id="senderChip">
+      <div class="tb-conn">
         <span class="tc-dot" id="sDot"></span>
         <span id="sText">Waiting…</span>
       </div>
@@ -110,7 +110,7 @@
 
     <div class="sender-grid">
 
-      <!-- QR Card -->
+      <!-- QR Card (hides after connection) -->
       <div class="glass-card" id="qrSection">
         <div class="gc-header">
           <span class="step-ball">1</span>
@@ -135,7 +135,7 @@
         </div>
       </div>
 
-      <!-- Connection Success Banner (replaces QR after connect) -->
+      <!-- Connected banner (shown after QR scan) -->
       <div class="conn-success-banner hidden" id="connSuccessBanner">
         <div class="csb-inner">
           <div class="csb-check">
@@ -145,8 +145,8 @@
             </svg>
           </div>
           <div class="csb-text">
-            <div class="csb-title">Receiver Connected!</div>
-            <div class="csb-sub">Drop files & hit Send to begin 🚀</div>
+            <div class="csb-title">Receiver Connected! 🎉</div>
+            <div class="csb-sub">Add files below & hit Send</div>
           </div>
         </div>
       </div>
@@ -157,10 +157,11 @@
           <span class="step-ball">2</span>
           <div>
             <div class="gc-title">Add files to send 📂</div>
-            <div class="gc-sub">Select first, hit Send when ready</div>
+            <div class="gc-sub">Drag &amp; drop or browse — then hit Send</div>
           </div>
         </div>
 
+        <!-- Drop zone -->
         <div class="drop-zone" id="dropzone">
           <input type="file" id="fileInput" multiple style="display:none" onchange="onFilePicked(this.files)"/>
           <div class="dz-inner">
@@ -177,6 +178,7 @@
           </button>
         </div>
 
+        <!-- File queue -->
         <div class="file-queue hidden" id="fileQueue">
           <div class="fq-bar">
             <div class="fq-left">
@@ -192,6 +194,7 @@
           </div>
         </div>
 
+        <!-- Active transfer card -->
         <div class="xfer-card hidden" id="txCard">
           <div class="xfer-top">
             <span class="xfer-ico" id="txIco">📄</span>
@@ -215,8 +218,8 @@
           </div>
         </div>
 
-      </div>
-    </div>
+      </div><!-- /files card -->
+    </div><!-- /sender-grid -->
 
     <div class="hist-section">
       <div class="hist-head">📋 Transfer History</div>
@@ -224,20 +227,21 @@
       <ul class="hist-list" id="sHistList"></ul>
     </div>
 
-  </div>
+  </div><!-- /sSender -->
 
-  <!-- ══════════ RECEIVER ══════════ -->
+  <!-- ══════════ RECEIVER SCREEN ══════════ -->
   <div class="screen" id="sReceiver">
 
     <div class="topbar">
       <button class="back-btn" onclick="goHome()">← Back</button>
       <span class="tb-badge recv-badge">📥 Receiver</span>
-      <div class="tb-conn" id="receiverChip">
+      <div class="tb-conn">
         <span class="tc-dot" id="rDot"></span>
         <span id="rText">Scan QR…</span>
       </div>
     </div>
 
+    <!-- Scan body -->
     <div class="recv-scan-wrap" id="recvScanBody">
       <div class="glass-card scanner-card">
 
@@ -263,17 +267,20 @@
           <button class="candy-btn ghost-candy hidden" id="btnCamOff" onclick="stopCam()">Stop Camera</button>
         </div>
 
+        <!-- Manual Peer ID fallback -->
         <div class="fallback-section hidden" id="camDenied">
           <p class="fallback-note">⚠️ Camera unavailable — enter Peer ID manually:</p>
           <div class="fallback-row">
-            <input type="text" id="manualPeerId" class="cartoon-input" placeholder="Paste Peer ID here…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"/>
+            <input type="text" id="manualPeerId" class="cartoon-input" placeholder="Paste Peer ID here…"
+              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"/>
             <button class="candy-btn green-candy" onclick="connectByPeerId()">Connect!</button>
           </div>
         </div>
 
       </div>
-    </div>
+    </div><!-- /recvScanBody -->
 
+    <!-- Connected state -->
     <div class="recv-connected-wrap hidden" id="recvConnected">
 
       <!-- Animated connected banner -->
@@ -291,6 +298,7 @@
         <div class="rcb-pulse"></div>
       </div>
 
+      <!-- Active receive card -->
       <div class="xfer-card hidden" id="rxCard">
         <div class="xfer-top">
           <span class="xfer-ico" id="rxIco">📄</span>
@@ -315,16 +323,16 @@
         <div class="hist-empty" id="rHistEmpty">Files will land here! 🛬</div>
         <ul class="hist-list" id="rHistList"></ul>
       </div>
-    </div>
+    </div><!-- /recvConnected -->
 
-  </div>
+  </div><!-- /sReceiver -->
 
-</div>
+</div><!-- /app -->
 
-<!-- TOAST -->
+<!-- ══ TOAST ══ -->
 <div class="toast hidden" id="toast"></div>
 
-<!-- CONFIRM MODAL -->
+<!-- ══ CONFIRM MODAL ══ -->
 <div class="modal-overlay hidden" id="modalOverlay">
   <div class="modal-card">
     <div class="modal-icon" id="modalEmoji">🤔</div>
@@ -337,7 +345,7 @@
   </div>
 </div>
 
-<!-- RETRY POPUP -->
+<!-- ══ RETRY POPUP ══ -->
 <div class="retry-overlay hidden" id="retryOverlay">
   <div class="retry-card">
     <div class="no-wifi-anim">
@@ -347,13 +355,11 @@
       <div class="nw-dot"></div>
       <div class="nw-cross">✕</div>
     </div>
-    <h3 class="retry-title">Oops! Connection Lost 😢</h3>
-    <p class="retry-msg" id="retryDesc">Network disconnected. We'll get you back!</p>
+    <h3 class="retry-title">Connection Lost 😢</h3>
+    <p class="retry-msg" id="retryDesc">Network disconnected. Tap Retry to reconnect!</p>
     <div class="retry-countdown" id="retryTimer"></div>
     <div class="retry-actions">
-      <button class="candy-btn green-candy big-candy" id="retryBtn" onclick="retryConnection()">
-        🔄 Retry Now
-      </button>
+      <button class="candy-btn green-candy big-candy" onclick="retryConnection()">🔄 Retry Now</button>
       <button class="candy-btn ghost-candy" onclick="retryGoHome()">🏠 Go Home</button>
     </div>
   </div>
