@@ -29,6 +29,19 @@
   <div class="deco ds-7">📡</div>
 </div>
 
+<!-- SUCCESS FLASH OVERLAY -->
+<div class="success-flash hidden" id="successFlash">
+  <div class="sf-inner">
+    <div class="sf-checkmark">
+      <svg viewBox="0 0 52 52" class="sf-svg">
+        <circle class="sf-circle" cx="26" cy="26" r="25" fill="none"/>
+        <path class="sf-check" fill="none" d="M14 27 l8 8 l16 -16"/>
+      </svg>
+    </div>
+    <div class="sf-text">Transfer Complete!</div>
+  </div>
+</div>
+
 <div id="app">
 
   <!-- ══════════ HOME ══════════ -->
@@ -98,7 +111,7 @@
     <div class="sender-grid">
 
       <!-- QR Card -->
-      <div class="glass-card">
+      <div class="glass-card" id="qrSection">
         <div class="gc-header">
           <span class="step-ball">1</span>
           <div>
@@ -120,9 +133,21 @@
           <span class="pid-val" id="myPeerIdDisplay">—</span>
           <button class="pid-copy-btn" onclick="copyPeerId()" id="copyBtn">📋 Copy</button>
         </div>
+      </div>
 
-        <div class="connected-burst hidden" id="qrConnected">
-          🎉 Receiver Connected!
+      <!-- Connection Success Banner (replaces QR after connect) -->
+      <div class="conn-success-banner hidden" id="connSuccessBanner">
+        <div class="csb-inner">
+          <div class="csb-check">
+            <svg viewBox="0 0 52 52" class="csb-svg">
+              <circle class="csb-circle" cx="26" cy="26" r="25" fill="none"/>
+              <path class="csb-path" fill="none" d="M14 27 l8 8 l16 -16"/>
+            </svg>
+          </div>
+          <div class="csb-text">
+            <div class="csb-title">Receiver Connected!</div>
+            <div class="csb-sub">Drop files & hit Send to begin 🚀</div>
+          </div>
         </div>
       </div>
 
@@ -250,12 +275,20 @@
     </div>
 
     <div class="recv-connected-wrap hidden" id="recvConnected">
-      <div class="connected-banner">
-        <div class="cb-icon">🎊</div>
-        <div>
-          <div class="cb-title">Connected to Sender!</div>
-          <div class="cb-sub" id="rcStatus">Waiting for files…</div>
+
+      <!-- Animated connected banner -->
+      <div class="recv-conn-banner" id="recvConnectedBanner">
+        <div class="rcb-check">
+          <svg viewBox="0 0 52 52" class="rcb-svg">
+            <circle class="rcb-circle" cx="26" cy="26" r="25" fill="none"/>
+            <path class="rcb-path" fill="none" d="M14 27 l8 8 l16 -16"/>
+          </svg>
         </div>
+        <div class="rcb-info">
+          <div class="rcb-title">Connected to Sender!</div>
+          <div class="rcb-sub" id="rcStatus">Waiting for files…</div>
+        </div>
+        <div class="rcb-pulse"></div>
       </div>
 
       <div class="xfer-card hidden" id="rxCard">
