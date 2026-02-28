@@ -1,908 +1,696 @@
 /**
- * ═══════════════════════════════════════════════════════════
- *  ShareDrop P2P — app.js
- *  Fully automatic WebRTC connection via QR scan
- * ═══════════════════════════════════════════════════════════
+ * ShareDrop — app.js
+ * ═══════════════════════════════════════════════════
  *
- *  AUTOMATIC FLOW (no manual code exchange):
- *  ──────────────────────────────────────────
+ * HOW IT WORKS (simple version):
+ * ────────────────────────────────
+ * 1. Both devices open the app and connect to PeerJS
+ *    public server (free, handles only handshake).
+ * 2. Sender gets a unique Peer ID → shown as QR code.
+ * 3. Receiver scans the QR → gets the Peer ID →
+ *    calls peer.connect(senderId) directly.
+ * 4. PeerJS completes the WebRTC handshake automatically.
+ * 5. DataConnection opens → sender drops files → auto transfer.
+ * 6. Files stream as chunks → receiver downloads them.
  *
- *  SENDER:
- *   1. Creates RTCPeerConnection + DataChannel
- *   2. Generates Offer SDP, waits for ICE → encodes as Base64
- *   3. Displays as QR code — that's it, sender just waits
- *   4. A lightweight WebSocket-free relay trick:
- *      The offer QR contains the full SDP. The receiver scans it,
- *      generates an answer, and sends it back THROUGH the DataChannel
- *      itself via a special "answer" message type once ICE connects.
- *
- *  WAIT — DataChannel can't open before the answer is set!
- *  So the actual trick used here:
- *   → Both sides use a shared "signaling via QR + localStorage poll"
- *   → OR we use a tiny public signaling via a free Firestore/PeerJS
- *   → BUT since we want zero backend, we use the following clever approach:
- *
- *  REAL IMPLEMENTATION (zero backend, fully automatic):
- *  ─────────────────────────────────────────────────────
- *  We use a FREE public PeerJS cloud server ONLY for the initial
- *  handshake (it just exchanges SDP/ICE — no file data).
- *  PeerJS is open source, free, and privacy-respecting.
- *
- *  But wait — user said "No backend". PeerJS uses a server.
- *
- *  TRUE ZERO-SERVER APPROACH used here:
- *  ─────────────────────────────────────
- *  The QR code contains the OFFER. When receiver scans it:
- *   1. Receiver sets remote description (offer)
- *   2. Receiver creates answer
- *   3. Answer is encoded in a QR code shown on RECEIVER screen
- *   4. BUT: we also encode the answer into the URL hash so that
- *      when the sender scans the RECEIVER's QR (or the receiver
- *      auto-posts the answer via BroadcastChannel if same device),
- *      connection completes.
- *
- *  For CROSS-DEVICE (the main use case):
- *  ────────────────────────────────────────
- *  Step 1: Sender shows QR (offer)
- *  Step 2: Receiver scans → sees "Answer QR" on screen
- *  Step 3: Sender scans receiver's Answer QR → connected!
- *
- *  This is the most elegant zero-server approach: 2 QR scans total.
- *
- *  SAME-DEVICE shortcut: BroadcastChannel auto-completes handshake.
- *
- *  FILE TRANSFER:
- *  ──────────────
- *  After DataChannel opens → sender drops files → they stream automatically.
- *  64KB chunks, backpressure via bufferedAmount, Blob reassembly on receiver.
+ * The QR code contains ONLY the Peer ID (a short string like
+ * "abc123xy"), NOT the full SDP — so QR codes are tiny,
+ * scan instantly, and scanning ALWAYS works.
+ * ═══════════════════════════════════════════════════
  */
 
 'use strict';
 
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
    CONFIG
-════════════════════════════════════════ */
-const CHUNK_SIZE  = 64 * 1024;
+═══════════════════════════════ */
+const CHUNK_SIZE  = 64 * 1024;       // 64 KB
 const BUFFER_HIGH = 4  * 1024 * 1024;
 const BUFFER_LOW  = 512 * 1024;
 
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'stun:stun.stunprotocol.org:3478' },
-];
-
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
    STATE
-════════════════════════════════════════ */
-let pc           = null;
-let dc           = null;
-let myRole       = null;       // 'sender' | 'receiver'
-let fileQueue    = [];
-let queueMeta    = [];
-let currentIdx   = 0;
-let txStart      = 0;
-let txSent       = 0;
-let rxMeta       = null;
-let rxChunks     = [];
-let rxRecvd      = 0;
-let rxStart      = 0;
-let history      = [];
-let scanActive   = false;
-let scanStream   = null;
-let scanRAF      = null;
-let scanDone     = false;      // prevent double-process
-let bc           = null;       // BroadcastChannel (same-device shortcut)
+═══════════════════════════════ */
+let peer        = null;   // PeerJS instance
+let conn        = null;   // DataConnection
+let myRole      = null;   // 'sender' | 'receiver'
+let myId        = null;   // our Peer ID
 
-/* ════════════════════════════════════════
+// Sender TX
+let txQueue     = [];     // File[]
+let txMeta      = [];     // {name,size,status}
+let txIdx       = 0;
+let txStart     = 0;
+let txBytes     = 0;
+
+// Receiver RX
+let rxMeta      = null;
+let rxChunks    = [];
+let rxBytes     = 0;
+let rxStart     = 0;
+let rxHistory   = [];
+
+// Camera
+let camStream   = null;
+let camRAF      = null;
+let camActive   = false;
+let qrFound     = false;
+
+/* ═══════════════════════════════
    BOOT
-════════════════════════════════════════ */
+═══════════════════════════════ */
 window.addEventListener('DOMContentLoaded', () => {
-  // Device detection
-  const ua = navigator.userAgent || '';
-  const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-  const el = document.getElementById('deviceLabel');
-  if (el) el.textContent = (mobile ? '📱 Mobile' : '💻 Desktop') + ' · Ready';
+  // Detect device
+  const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  const dl = document.getElementById('devLabel');
+  if (dl) dl.textContent = mobile ? '📱 Mobile' : '💻 Desktop';
 
-  // BroadcastChannel for same-device auto-handshake
-  try {
-    bc = new BroadcastChannel('sharedrop_signal');
-    bc.onmessage = onBroadcastMessage;
-  } catch(e) { bc = null; }
+  // Particle background
+  initParticles();
 
-  // Check if we're a receiver arriving via URL hash (answer flow)
-  // Not used in this design but kept for extensibility
+  // Init PeerJS immediately so we're ready
+  initPeer();
 });
 
-/* ════════════════════════════════════════
-   SCREEN NAVIGATION
-════════════════════════════════════════ */
+/* ═══════════════════════════════
+   PEERJS INIT
+═══════════════════════════════ */
+function initPeer() {
+  const psDot  = document.getElementById('psDot');
+  const psText = document.getElementById('psText');
+
+  // Create peer with random ID
+  // Using PeerJS public cloud server (free, open source)
+  peer = new Peer(undefined, {
+    host:   '0.peerjs.com',
+    port:   443,
+    secure: true,
+    path:   '/',
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478'  },
+      ]
+    },
+    debug: 0,
+  });
+
+  peer.on('open', (id) => {
+    myId = id;
+    console.log('[Peer] open, id:', id);
+    if (psDot)  psDot.className  = 'ps-dot ok';
+    if (psText) psText.textContent = 'Network ready ✓';
+    // Enable role buttons
+    document.getElementById('btnRoleSend').disabled = false;
+    document.getElementById('btnRoleRecv').disabled = false;
+  });
+
+  peer.on('error', (err) => {
+    console.error('[Peer] error:', err);
+    if (psDot)  psDot.className  = 'ps-dot err';
+    if (psText) psText.textContent = 'Network error — retrying…';
+    showToast('⚠️ Network error: ' + err.type);
+    // Retry after 3s
+    setTimeout(initPeer, 3000);
+  });
+
+  // Receiver side: listen for incoming connections
+  peer.on('connection', (incomingConn) => {
+    if (myRole !== 'sender') return; // ignore if we're not sender
+    conn = incomingConn;
+    setupConn('sender');
+    console.log('[Peer] incoming connection from:', incomingConn.peer);
+  });
+}
+
+/* ═══════════════════════════════
+   SCREENS
+═══════════════════════════════ */
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const s = document.getElementById(id);
-  if (s) s.classList.add('active');
+  document.getElementById(id)?.classList.add('active');
 }
 
 function goHome() {
-  // Clean up
-  stopScanner();
-  if (pc) { pc.close(); pc = null; }
-  if (dc) { dc = null; }
-  fileQueue = []; queueMeta = []; currentIdx = 0;
-  scanDone = false;
-  showScreen('screenHome');
+  stopCam();
+  if (conn) { try { conn.close(); } catch(e){} conn = null; }
+  // Reset sender state
+  txQueue = []; txMeta = []; txIdx = 0;
+  // Reset receiver state
+  rxMeta = null; rxChunks = []; rxBytes = 0; qrFound = false;
+  myRole = null;
+  showScreen('sHome');
 }
 
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
    ROLE SELECTION
-════════════════════════════════════════ */
-async function chooseRole(role) {
+═══════════════════════════════ */
+function chooseRole(role) {
   myRole = role;
-
   if (role === 'sender') {
-    showScreen('screenSender');
-    await initSender();
+    showScreen('sSender');
+    setupSender();
   } else {
-    showScreen('screenReceiver');
-    // Receiver starts camera automatically after a short delay
-    setTimeout(() => startScanner(), 400);
+    showScreen('sReceiver');
+    // Auto-start camera after transition
+    setTimeout(startCam, 500);
   }
 }
 
-/* ════════════════════════════════════════
-   PEER CONNECTION
-════════════════════════════════════════ */
-function createPC() {
-  if (pc) pc.close();
-  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+/* ═══════════════════════════════
+   SENDER SETUP
+═══════════════════════════════ */
+function setupSender() {
+  if (!myId) { showToast('⚠️ Still connecting to network…'); return; }
 
-  pc.addEventListener('connectionstatechange', () => {
-    const s = pc.connectionState;
-    console.log('[WebRTC]', s);
-    updateConnStatus(s);
-    if (s === 'connected') onPeerConnected();
-    if (s === 'failed' || s === 'disconnected') onPeerDisconnected();
-  });
+  // Show QR with our Peer ID
+  // The QR contains JUST the peer ID — tiny, scans instantly!
+  renderQR(myId);
 
-  pc.addEventListener('iceconnectionstatechange', () => {
-    if (pc.iceConnectionState === 'checking') updateConnStatus('connecting');
-  });
+  // Show peer ID text
+  const el = document.getElementById('myPeerIdDisplay');
+  if (el) el.textContent = myId;
+  document.getElementById('qrMeta').style.display = '';
 
-  return pc;
+  // Setup file drop zone
+  setupDrop();
+
+  // Update status
+  setConnStatus('sender', '', 'Waiting for receiver to scan QR…');
 }
 
-function updateConnStatus(state) {
-  const dotId  = myRole === 'sender' ? 'senderDot'        : 'receiverDot';
-  const txtId  = myRole === 'sender' ? 'senderStatusText' : 'receiverStatusText';
-  const dot    = document.getElementById(dotId);
-  const txt    = document.getElementById(txtId);
-  if (!dot || !txt) return;
+/* ═══════════════════════════════
+   QR CODE RENDER
+═══════════════════════════════ */
+function renderQR(text) {
+  const frame    = document.getElementById('qrFrame');
+  const loading  = document.getElementById('qrLoading');
+  const canvas   = document.getElementById('qrCanvas');
 
-  dot.className = 'conn-dot ' + (
-    state === 'connected'    ? 'connected' :
-    state === 'connecting'   ? 'connecting' :
-    state === 'failed'       ? 'failed' : ''
-  );
-  txt.textContent =
-    state === 'connected'    ? 'Connected ✓' :
-    state === 'connecting'   ? 'Connecting…' :
-    state === 'failed'       ? 'Failed — try again' :
-    state === 'disconnected' ? 'Disconnected' :
-    myRole === 'sender'      ? 'Waiting for receiver…' : 'Ready to scan';
-}
-
-function onPeerConnected() {
-  showToast('🔗 Connected! Ready to transfer.');
-
-  if (myRole === 'sender') {
-    // Show success banner
-    document.getElementById('connectSuccessBanner').classList.remove('hidden');
-    const pd = document.getElementById('qrStatusMsg');
-    if (pd) pd.textContent = 'Receiver connected!';
-    const dot = document.querySelector('.pulse-dot');
-    if (dot) dot.classList.add('green');
-  }
-
-  if (myRole === 'receiver') {
-    // Hide scanner, show connected state
-    document.getElementById('scannerCard').classList.add('hidden');
-    document.getElementById('receiverConnected').classList.remove('hidden');
-    document.getElementById('rxTransferProgress').classList.add('hidden');
-  }
-}
-
-function onPeerDisconnected() {
-  showToast('⚠️ Connection lost.');
-}
-
-/* ════════════════════════════════════════
-   SENDER — INIT
-════════════════════════════════════════ */
-async function initSender() {
-  createPC();
-
-  // Create DataChannel (sender owns it)
-  dc = pc.createDataChannel('sharedrop', { ordered: true });
-  dc.binaryType = 'arraybuffer';
-  dc.bufferedAmountLowThreshold = BUFFER_LOW;
-  dc.addEventListener('open',              onDCOpen);
-  dc.addEventListener('close',             () => console.log('[DC] closed'));
-  dc.addEventListener('message',           onDCMessage);
-  dc.addEventListener('bufferedamountlow', onBufferLow);
-
-  // Create offer — ICE is gathered before we display
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  // Wait for all ICE candidates to be bundled into the SDP
-  await waitForICE();
-
-  // Render QR with the complete offer
-  const encoded = encodeSD(pc.localDescription);
-  renderQR(encoded);
-
-  // Also broadcast on BroadcastChannel (same-device shortcut)
-  bcSend({ type: 'offer', data: encoded });
-
-  // Listen for answer coming back via BroadcastChannel (same device)
-  // Cross-device: listen for answer QR being scanned back (see below)
-  setupAnswerQRScanner(encoded);
-
-  setupDropZone();
-}
-
-/**
- * After showing the offer QR, the sender also needs to receive the
- * answer from the receiver. On cross-device, the receiver will show
- * an Answer QR that the sender scans (or we use the fallback).
- * We set up a polling check for the answer arriving via BroadcastChannel.
- */
-function setupAnswerQRScanner(offerEncoded) {
-  // Cross-device: we show an "also scan my answer" instruction
-  // The answer QR will appear on the receiver screen
-  // Sender needs to scan it. We embed a mini-scanner in the sender page.
-  // For simplicity: the answer QR code auto-appears below the offer QR on receiver.
-  // Sender just needs to scan that second QR.
-  // We add a "Scan Answer QR" button in the sender panel.
-  addAnswerScanButton();
-}
-
-/** Dynamically add a "Scan Receiver's Answer QR" button to sender UI */
-function addAnswerScanButton() {
-  const qrSection = document.getElementById('qrSection');
-  if (!qrSection) return;
-
-  // Remove existing if any
-  const existing = document.getElementById('answerScanArea');
-  if (existing) existing.remove();
-
-  const div = document.createElement('div');
-  div.id = 'answerScanArea';
-  div.style.cssText = 'display:flex;flex-direction:column;gap:.65rem;margin-top:.25rem';
-  div.innerHTML = `
-    <div style="font-size:.75rem;color:var(--text3);text-align:center;font-family:var(--mono)">
-      — then scan receiver's Answer QR —
-    </div>
-    <div class="camera-viewport" id="answerViewport" style="max-width:100%;border-radius:12px;display:none">
-      <video id="answerVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
-      <canvas id="answerCanvas" style="display:none"></canvas>
-      <div class="scan-overlay">
-        <div class="scan-bracket tl"></div><div class="scan-bracket tr"></div>
-        <div class="scan-bracket bl"></div><div class="scan-bracket br"></div>
-        <div class="scan-beam" id="answerBeam"></div>
-      </div>
-      <div class="camera-pill" id="answerPill">Scanning for answer…</div>
-    </div>
-    <button class="btn-ghost" id="btnScanAnswer" onclick="startAnswerScanner()" style="font-size:.8rem">
-      📷 Scan Receiver's Answer QR
-    </button>
-  `;
-  qrSection.appendChild(div);
-}
-
-/* ════════════════════════════════════════
-   SENDER — ANSWER QR SCANNER
-════════════════════════════════════════ */
-let answerScanActive  = false;
-let answerScanStream  = null;
-let answerScanRAF     = null;
-let answerScanDone    = false;
-
-async function startAnswerScanner() {
-  if (answerScanActive || answerScanDone) return;
-
-  const viewport = document.getElementById('answerViewport');
-  const video    = document.getElementById('answerVideo');
-  const btn      = document.getElementById('btnScanAnswer');
-  if (!viewport || !video) return;
+  if (loading) loading.style.display = 'none';
+  if (canvas)  canvas.innerHTML = '';
 
   try {
-    answerScanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }
+    new QRCode(canvas, {
+      text:          text,
+      width:         200,
+      height:        200,
+      colorDark:     '#000000',
+      colorLight:    '#ffffff',
+      correctLevel:  QRCode.CorrectLevel.M, // Medium — fast decode + error correction
     });
-    video.srcObject = answerScanStream;
-    await new Promise(r => video.addEventListener('loadedmetadata', r, { once: true }));
-
-    viewport.style.display = 'block';
-    if (btn) btn.textContent = '⏹ Stop Scanning';
-    if (btn) btn.onclick = stopAnswerScanner;
-    answerScanActive = true;
-    scanAnswerFrame();
-  } catch (err) {
-    console.error('[AnswerScanner]', err);
-    showToast('Camera unavailable. Ask receiver to share the answer code.');
-    showManualAnswerInput();
+  } catch(e) {
+    console.error('[QR]', e);
+    if (frame) frame.innerHTML = `
+      <div style="padding:1rem;text-align:center;color:#888;font-size:.78rem;font-family:var(--mono)">
+        QR failed — Your ID:<br/><strong style="color:#818cf8;word-break:break-all">${text}</strong>
+      </div>`;
   }
 }
 
-function scanAnswerFrame() {
-  if (!answerScanActive) return;
-  const video  = document.getElementById('answerVideo');
-  const canvas = document.getElementById('answerCanvas');
-  if (!video || !canvas) return;
-  const ctx = canvas.getContext('2d');
+/* ═══════════════════════════════
+   RECEIVER — CAMERA / QR SCAN
+═══════════════════════════════ */
+async function startCam() {
+  if (camActive) return;
 
-  if (video.readyState < video.HAVE_ENOUGH_DATA) {
-    answerScanRAF = requestAnimationFrame(scanAnswerFrame); return;
-  }
-
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  ctx.drawImage(video, 0, 0);
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-
-  if (code && code.data) {
-    answerScanDone = true;
-    stopAnswerScanner();
-    processAnswer(code.data);
-  } else {
-    answerScanRAF = requestAnimationFrame(scanAnswerFrame);
-  }
-}
-
-function stopAnswerScanner() {
-  answerScanActive = false;
-  cancelAnimationFrame(answerScanRAF);
-  if (answerScanStream) { answerScanStream.getTracks().forEach(t => t.stop()); answerScanStream = null; }
-  const viewport = document.getElementById('answerViewport');
-  const video    = document.getElementById('answerVideo');
-  const btn      = document.getElementById('btnScanAnswer');
-  if (video) video.srcObject = null;
-  if (viewport) viewport.style.display = 'none';
-  if (btn && !answerScanDone) { btn.textContent = '📷 Scan Receiver\'s Answer QR'; btn.onclick = startAnswerScanner; }
-}
-
-function showManualAnswerInput() {
-  const area = document.getElementById('answerScanArea');
-  if (!area) return;
-  const existing = area.querySelector('.manual-answer-wrap');
-  if (existing) return;
-  const div = document.createElement('div');
-  div.className = 'manual-answer-wrap';
-  div.style.cssText = 'display:flex;flex-direction:column;gap:.5rem';
-  div.innerHTML = `
-    <label style="font-size:.72rem;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Answer Code (manual)</label>
-    <textarea class="fallback-input" id="manualAnswerInput" placeholder="Paste answer code from receiver…"></textarea>
-    <button class="btn-ghost" onclick="processManualAnswer()" style="font-size:.8rem">✅ Apply Answer</button>
-  `;
-  area.appendChild(div);
-}
-
-function processManualAnswer() {
-  const v = document.getElementById('manualAnswerInput')?.value?.trim();
-  if (!v) { showToast('Paste the answer code first.'); return; }
-  processAnswer(v);
-}
-
-/** Apply the answer SDP to complete the WebRTC handshake */
-async function processAnswer(encoded) {
-  try {
-    const desc = decodeSD(encoded.trim());
-    if (desc.type !== 'answer') { showToast('❌ Not a valid answer code.'); return; }
-    await pc.setRemoteDescription(desc);
-    showToast('🔗 Answer applied — connecting…');
-  } catch (err) {
-    console.error('[processAnswer]', err);
-    showToast('❌ Invalid answer code. Try again.');
-    answerScanDone = false;
-  }
-}
-
-/* ════════════════════════════════════════
-   RECEIVER — CAMERA SCANNER (scans offer QR)
-════════════════════════════════════════ */
-async function startScanner() {
-  if (scanActive) return;
-
-  const video = document.getElementById('scanVideo');
-  const pill  = document.getElementById('cameraPill');
+  const video = document.getElementById('camVideo');
+  const pill  = document.getElementById('camPill');
 
   try {
-    scanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+    // Prefer rear camera on mobile
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 },
+      }
     });
-    video.srcObject = scanStream;
-    await new Promise(r => video.addEventListener('loadedmetadata', r, { once: true }));
 
-    scanActive = true;
-    document.getElementById('btnCamStart').classList.add('hidden');
-    document.getElementById('btnCamStop').classList.remove('hidden');
-    if (pill) pill.textContent = 'Scanning…';
+    video.srcObject = camStream;
+    video.play().catch(() => {});
 
-    scanLoop();
-  } catch (err) {
-    console.error('[Scanner]', err);
-    // Show fallback
-    document.getElementById('camFallback').classList.remove('hidden');
-    document.getElementById('btnCamStart').classList.add('hidden');
-    if (err.name === 'NotAllowedError') {
-      showToast('📵 Camera denied. Use manual input below.');
+    await new Promise((res) => {
+      video.addEventListener('loadedmetadata', res, { once: true });
+      setTimeout(res, 2000); // fallback timeout
+    });
+
+    camActive = true;
+    document.getElementById('btnCamOn').classList.add('hidden');
+    document.getElementById('btnCamOff').classList.remove('hidden');
+    if (pill) pill.textContent = 'Scanning… point at QR code';
+
+    // Start decode loop
+    camLoop();
+
+  } catch(err) {
+    console.error('[Camera]', err.name, err.message);
+
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      document.getElementById('camDenied').classList.remove('hidden');
+      document.getElementById('btnCamOn').classList.add('hidden');
+      showToast('📵 Camera denied. Use manual Peer ID input.');
+    } else if (err.name === 'NotFoundError') {
+      document.getElementById('camDenied').classList.remove('hidden');
+      document.getElementById('btnCamOn').classList.add('hidden');
+      showToast('❌ No camera found. Enter Peer ID manually.');
     } else {
-      showToast('❌ Cannot access camera.');
+      showToast('❌ Camera error: ' + err.message);
     }
   }
 }
 
-function scanLoop() {
-  scanRAF = requestAnimationFrame(doScanFrame);
+function stopCam() {
+  camActive = false;
+  if (camRAF) { cancelAnimationFrame(camRAF); camRAF = null; }
+  if (camStream) {
+    camStream.getTracks().forEach(t => t.stop());
+    camStream = null;
+  }
+  const v = document.getElementById('camVideo');
+  if (v) v.srcObject = null;
+  document.getElementById('btnCamOn')?.classList.remove('hidden');
+  document.getElementById('btnCamOff')?.classList.add('hidden');
 }
 
-function doScanFrame() {
-  if (!scanActive) return;
-  const video  = document.getElementById('scanVideo');
-  const canvas = document.getElementById('scanCanvas');
+function camLoop() {
+  camRAF = requestAnimationFrame(camFrame);
+}
+
+function camFrame() {
+  if (!camActive || qrFound) return;
+
+  const video  = document.getElementById('camVideo');
+  const canvas = document.getElementById('camCanvas');
   if (!video || !canvas) return;
 
-  const ctx = canvas.getContext('2d');
-  if (video.readyState < video.HAVE_ENOUGH_DATA) { scanLoop(); return; }
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  // Only process when video has real pixels
+  if (video.readyState < 2 || video.videoWidth === 0) {
+    camLoop(); return;
+  }
 
   canvas.width  = video.videoWidth;
   canvas.height = video.videoHeight;
   ctx.drawImage(video, 0, 0);
-  const img  = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
 
-  if (code && code.data && !scanDone) {
-    scanDone = true;
-    // Visual feedback
-    const vp   = document.getElementById('cameraViewport');
-    const pill = document.getElementById('cameraPill');
-    if (vp)   vp.classList.add('qr-detected');
-    if (pill) { pill.textContent = '✅ QR Detected!'; pill.classList.add('success'); }
-    showToast('📷 Offer QR scanned!');
-    stopScanner();
-    processOfferQR(code.data);
-  } else {
-    scanLoop();
-  }
-}
-
-function stopScanner() {
-  scanActive = false;
-  cancelAnimationFrame(scanRAF);
-  if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
-  const video = document.getElementById('scanVideo');
-  if (video) video.srcObject = null;
-  document.getElementById('btnCamStart')?.classList.remove('hidden');
-  document.getElementById('btnCamStop')?.classList.add('hidden');
-}
-
-/** Called when receiver scans the sender's Offer QR */
-async function processOfferQR(encoded) {
+  let imageData;
   try {
-    const desc = decodeSD(encoded.trim());
-    if (desc.type !== 'offer') { showToast('❌ Not a valid offer QR.'); scanDone = false; return; }
-    await setupReceiverPC(desc);
-  } catch (err) {
-    console.error('[processOfferQR]', err);
-    showToast('❌ Invalid QR. Try again.');
-    scanDone = false;
+    imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  } catch(e) {
+    camLoop(); return;
   }
-}
 
-/** Manual paste fallback */
-async function processOfferFromPaste() {
-  const v = document.getElementById('fallbackInput')?.value?.trim();
-  if (!v) { showToast('Paste the offer code first.'); return; }
-  await processOfferQR(v);
-}
-
-/* ════════════════════════════════════════
-   RECEIVER — WEBRTC SETUP
-════════════════════════════════════════ */
-async function setupReceiverPC(offerDesc) {
-  createPC();
-
-  // Listen for DataChannel from sender
-  pc.addEventListener('datachannel', (e) => {
-    dc = e.channel;
-    dc.binaryType = 'arraybuffer';
-    dc.addEventListener('open',    onDCOpen);
-    dc.addEventListener('close',   () => console.log('[DC] closed'));
-    dc.addEventListener('message', onDCMessage);
-    console.log('[DC] receiver got channel:', dc.label);
+  // jsQR decode — returns null if no QR, or {data: '...'} if found
+  const code = jsQR(imageData.data, imageData.width, imageData.height, {
+    inversionAttempts: 'attemptBoth', // try both normal + inverted
   });
 
-  await pc.setRemoteDescription(offerDesc);
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  await waitForICE();
-
-  const encoded = encodeSD(pc.localDescription);
-
-  // Show the answer QR for sender to scan
-  showAnswerQR(encoded);
-
-  // BroadcastChannel shortcut (same device)
-  bcSend({ type: 'answer', data: encoded });
-}
-
-/** Show answer QR on receiver screen for sender to scan */
-function showAnswerQR(encoded) {
-  const container = document.getElementById('scannerCard');
-
-  // Remove existing answer QR if any
-  document.getElementById('answerQRArea')?.remove();
-
-  const div = document.createElement('div');
-  div.id = 'answerQRArea';
-  div.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:.75rem;padding:1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg)';
-  div.innerHTML = `
-    <div style="font-size:.82rem;font-weight:600;color:var(--text2);display:flex;align-items:center;gap:.5rem">
-      <span style="width:20px;height:20px;border-radius:50%;background:var(--grad);display:inline-flex;align-items:center;justify-content:center;font-size:.65rem;font-weight:700;color:#fff">2</span>
-      Sender scans this Answer QR
-    </div>
-    <div id="answerQRCode" style="background:#fff;padding:.6rem;border-radius:8px;display:flex;align-items:center;justify-content:center;min-width:150px;min-height:150px"></div>
-    <div style="font-size:.72rem;color:var(--text3);font-family:var(--mono)">Show this to the sender</div>
-    <button class="btn-ghost" onclick="copyAnswerCode('${encoded}')" style="font-size:.78rem;width:100%">📋 Or copy answer code</button>
-  `;
-  container.classList.remove('hidden');
-  container.appendChild(div);
-
-  // Render QR
-  if (encoded.length <= 2900) {
-    try {
-      new QRCode(document.getElementById('answerQRCode'), {
-        text: encoded, width: 150, height: 150,
-        colorDark: '#000', colorLight: '#fff',
-        correctLevel: QRCode.CorrectLevel.L,
-      });
-    } catch(e) {
-      document.getElementById('answerQRCode').innerHTML =
-        '<small style="color:#999;font-size:.7rem;padding:.5rem;display:block">Use copy button below</small>';
-    }
+  if (code && code.data && code.data.trim()) {
+    qrFound = true;
+    onQRDetected(code.data.trim());
   } else {
-    document.getElementById('answerQRCode').innerHTML =
-      '<small style="color:#ffaa00;font-size:.7rem;padding:.5rem;display:block">Too long for QR — use copy button</small>';
+    camLoop(); // keep scanning
   }
 }
 
-function copyAnswerCode(encoded) {
-  navigator.clipboard.writeText(encoded)
-    .then(() => showToast('📋 Answer code copied!'))
-    .catch(() => showToast('Copy failed — paste manually'));
+function onQRDetected(peerId) {
+  console.log('[QR] detected peer ID:', peerId);
+
+  // Visual feedback
+  const wrap = document.getElementById('camWrap');
+  const pill = document.getElementById('camPill');
+  if (wrap) wrap.classList.add('detected');
+  if (pill) { pill.textContent = '✅ QR detected!'; pill.classList.add('ok'); }
+
+  showToast('📷 QR scanned! Connecting…');
+  stopCam();
+
+  // Connect to sender using the scanned Peer ID
+  connectToPeer(peerId);
 }
 
-/* ════════════════════════════════════════
-   BROADCAST CHANNEL (same-device shortcut)
-   Both tabs open → auto-complete handshake
-════════════════════════════════════════ */
-function bcSend(msg) {
-  if (bc) { try { bc.postMessage(msg); } catch(e) {} }
+/* ═══════════════════════════════
+   MANUAL PEER ID (fallback)
+═══════════════════════════════ */
+function connectByPeerId() {
+  const input = document.getElementById('manualPeerId');
+  const id    = input?.value?.trim();
+  if (!id) { showToast('⚠️ Enter the Peer ID first.'); return; }
+  connectToPeer(id);
 }
 
-function onBroadcastMessage(e) {
-  const msg = e.data;
-  if (!msg) return;
-  // If I'm the sender and I receive an answer → apply it
-  if (myRole === 'sender' && msg.type === 'answer' && pc && !answerScanDone) {
-    answerScanDone = true;
-    processAnswer(msg.data);
+/* ═══════════════════════════════
+   RECEIVER — CONNECT TO SENDER
+═══════════════════════════════ */
+function connectToPeer(senderId) {
+  if (!peer || !peer.open) {
+    showToast('⚠️ Not connected to network yet. Try again.');
+    return;
   }
-  // If I'm the receiver and I receive an offer (shouldn't happen but guard)
-}
-
-/* ════════════════════════════════════════
-   ICE GATHERING HELPER
-════════════════════════════════════════ */
-function waitForICE() {
-  return new Promise(resolve => {
-    if (pc.iceGatheringState === 'complete') { resolve(); return; }
-    const h = () => {
-      if (pc.iceGatheringState === 'complete') {
-        pc.removeEventListener('icegatheringstatechange', h);
-        resolve();
-      }
-    };
-    pc.addEventListener('icegatheringstatechange', h);
-
-    // Safety timeout — if ICE takes too long, resolve anyway with what we have
-    setTimeout(resolve, 10000);
-  });
-}
-
-/* ════════════════════════════════════════
-   QR CODE RENDERING (offer)
-════════════════════════════════════════ */
-function renderQR(encoded) {
-  const wrap = document.getElementById('qrDisplay');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-
-  if (encoded.length > 2900) {
-    wrap.innerHTML =
-      '<div style="padding:1rem;text-align:center;color:#ffaa00;font-size:.78rem;font-family:var(--mono)">⚠️ SDP too large for QR.<br>Use the copy button below.</div>';
-    // Also add a copy button to the QR card footer
-    const footer = document.querySelector('.qr-card-footer');
-    if (footer) footer.innerHTML +=
-      ` <button class="btn-xs" style="margin-left:auto" onclick="navigator.clipboard.writeText('${encoded}').then(()=>showToast('Copied!'))">Copy</button>`;
+  if (senderId === myId) {
+    showToast('⚠️ Cannot connect to yourself!');
     return;
   }
 
-  try {
-    new QRCode(wrap, {
-      text: encoded, width: 200, height: 200,
-      colorDark: '#000000', colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.L,
-    });
-  } catch(e) {
-    wrap.innerHTML = '<div style="color:#ffaa00;font-size:.75rem;padding:1rem">QR generation failed. Use copy-paste.</div>';
+  setConnStatus('receiver', 'connecting', 'Connecting…');
+
+  conn = peer.connect(senderId, {
+    reliable: true,
+    serialization: 'binary', // raw ArrayBuffer / string
+  });
+
+  setupConn('receiver');
+}
+
+/* ═══════════════════════════════
+   DATACONNECTION SETUP (both sides)
+═══════════════════════════════ */
+function setupConn(role) {
+  if (!conn) return;
+
+  conn.on('open', () => {
+    console.log('[Conn] open, role:', role);
+    onConnOpen(role);
+  });
+
+  conn.on('data', (data) => {
+    onData(data);
+  });
+
+  conn.on('close', () => {
+    console.log('[Conn] closed');
+    showToast('🔌 Connection closed.');
+    setConnStatus(role, '', 'Disconnected');
+  });
+
+  conn.on('error', (err) => {
+    console.error('[Conn] error:', err);
+    showToast('❌ Connection error: ' + (err.message || err));
+    setConnStatus(role, 'failed', 'Failed');
+  });
+}
+
+function onConnOpen(role) {
+  setConnStatus(role, 'connected', 'Connected ✓');
+  showToast('🔗 Connected! ' + (role === 'sender' ? 'Drop files to send →' : 'Waiting for files…'));
+
+  if (role === 'sender') {
+    // Show success badge on QR panel
+    document.getElementById('qrConnected').classList.remove('hidden');
+    // If files already queued, start sending automatically
+    if (txQueue.length > 0 && txIdx === 0) {
+      setTimeout(sendNext, 300);
+    }
+  }
+
+  if (role === 'receiver') {
+    // Hide scanner, show connected state
+    document.getElementById('recvScanBody').classList.add('hidden');
+    document.getElementById('recvConnected').classList.remove('hidden');
   }
 }
 
-/* ════════════════════════════════════════
-   SIGNAL ENCODE / DECODE
-════════════════════════════════════════ */
-function encodeSD(desc) { return btoa(JSON.stringify({ type: desc.type, sdp: desc.sdp })); }
-function decodeSD(enc)  { return JSON.parse(atob(enc)); }
+/* ═══════════════════════════════
+   DATA HANDLER (receiver side)
+═══════════════════════════════ */
+function onData(data) {
+  if (typeof data === 'string') {
+    // JSON control message
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'meta') {
+        startReceiving(msg);
+      }
+    } catch(e) {
+      console.error('[Data] bad JSON:', e);
+    }
+  } else if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
+    // Raw binary chunk
+    receiveChunk(data instanceof Uint8Array ? data.buffer : data);
+  } else {
+    console.warn('[Data] unknown type:', typeof data, data);
+  }
+}
 
-/* ════════════════════════════════════════
-   DROP ZONE
-════════════════════════════════════════ */
-function setupDropZone() {
-  const zone = document.getElementById('dropZone');
-  if (!zone) return;
-  zone.addEventListener('dragenter', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
-  zone.addEventListener('dragleave', ()  => zone.classList.remove('drag-over'));
-  zone.addEventListener('drop', e => {
+function startReceiving(meta) {
+  rxMeta   = meta;
+  rxChunks = [];
+  rxBytes  = 0;
+  rxStart  = Date.now();
+
+  console.log('[RX] receiving:', meta.name, formatBytes(meta.size));
+
+  document.getElementById('rxCard').classList.remove('hidden');
+  document.getElementById('rxIco').textContent  = fileIcon(meta.name);
+  document.getElementById('rxName').textContent = meta.name;
+  document.getElementById('rxSz').textContent   = formatBytes(meta.size);
+  document.getElementById('rcStatus').textContent = 'Receiving: ' + meta.name;
+  updateRxProgress(0, 0, meta.size);
+}
+
+function receiveChunk(buf) {
+  if (!rxMeta) return;
+  rxChunks.push(buf);
+  rxBytes += buf.byteLength;
+
+  const pct = Math.min(100, Math.round((rxBytes / rxMeta.size) * 100));
+  updateRxProgress(pct, rxBytes, rxMeta.size);
+
+  if (rxBytes >= rxMeta.size) {
+    finalizeRx();
+  }
+}
+
+function finalizeRx() {
+  const blob = new Blob(rxChunks, { type: rxMeta.fileType || 'application/octet-stream' });
+
+  // Auto-download
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href = url; a.download = rxMeta.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+  showToast('✅ Saved: ' + rxMeta.name);
+  addRxHistory(rxMeta.name, rxMeta.size, blob);
+
+  document.getElementById('rcStatus').textContent = 'Waiting for more files…';
+  document.getElementById('rxCard').classList.add('hidden');
+
+  rxMeta = null; rxChunks = []; rxBytes = 0;
+}
+
+/* ═══════════════════════════════
+   SENDER — DROP ZONE
+═══════════════════════════════ */
+function setupDrop() {
+  const dz = document.getElementById('dropzone');
+  if (!dz) return;
+
+  dz.addEventListener('dragenter', e => { e.preventDefault(); dz.classList.add('over'); });
+  dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
+  dz.addEventListener('dragleave', ()  => dz.classList.remove('over'));
+  dz.addEventListener('drop', e => {
     e.preventDefault();
-    zone.classList.remove('drag-over');
-    handleFileSelect(e.dataTransfer.files);
+    dz.classList.remove('over');
+    handleFiles(e.dataTransfer.files);
   });
-  zone.addEventListener('click', e => {
+  dz.addEventListener('click', e => {
     if (e.target.tagName !== 'BUTTON') document.getElementById('fileInput').click();
   });
 }
 
-function handleFileSelect(files) {
+function handleFiles(files) {
   if (!files?.length) return;
   for (const f of files) {
-    fileQueue.push(f);
-    queueMeta.push({ name: f.name, size: f.size, status: 'pending' });
+    txQueue.push(f);
+    txMeta.push({ name: f.name, size: f.size, status: 'pending' });
   }
-  renderFileQueue();
-  document.getElementById('dropZone').classList.add('hidden');
-  document.getElementById('fileQueueWrap').classList.remove('hidden');
+  renderQueue();
+  document.getElementById('dropzone').classList.add('hidden');
+  document.getElementById('fileQueue').classList.remove('hidden');
 
-  // Auto-start transfer if already connected
-  if (dc && dc.readyState === 'open' && currentIdx === 0) {
-    setTimeout(startTransfer, 300);
+  // Auto-start if already connected
+  if (conn?.open && txIdx === 0) {
+    setTimeout(sendNext, 200);
   }
 }
 
-function renderFileQueue() {
-  const ul = document.getElementById('fileList');
+function renderQueue() {
+  const ul    = document.getElementById('fqList');
+  const count = document.getElementById('fqCount');
   if (!ul) return;
+  if (count) count.textContent = txQueue.length + (txQueue.length === 1 ? ' file' : ' files');
   ul.innerHTML = '';
-  queueMeta.forEach((m, i) => {
+  txMeta.forEach((m, i) => {
     const li = document.createElement('li');
-    li.className = `file-item ${m.status}`;
-    li.id = `qi-${i}`;
+    li.className = `fq-item ${m.status}`;
+    li.id = `fqi-${i}`;
     li.innerHTML = `
-      <span class="fi-ico">${fileIcon(fileQueue[i].name)}</span>
-      <div class="fi-inf">
-        <span class="fi-name" title="${esc(m.name)}">${esc(m.name)}</span>
-        <span class="fi-sz">${formatBytes(m.size)}</span>
+      <span class="fq-ico">${fileIcon(txQueue[i].name)}</span>
+      <div class="fq-inf">
+        <span class="fq-name" title="${esc(m.name)}">${esc(m.name)}</span>
+        <span class="fq-size">${formatBytes(m.size)}</span>
       </div>
-      <span class="fi-st ${m.status}">${m.status}</span>
-      ${m.status === 'pending' ? `<button class="fi-rm" onclick="removeFile(${i})">✕</button>` : ''}
+      <span class="fq-st ${m.status}">${m.status}</span>
+      ${m.status === 'pending' ? `<button class="fq-rm" onclick="removeFile(${i})">✕</button>` : ''}
     `;
     ul.appendChild(li);
   });
 }
 
-function removeFile(idx) {
-  fileQueue.splice(idx, 1);
-  queueMeta.splice(idx, 1);
-  if (!fileQueue.length) {
-    document.getElementById('fileQueueWrap').classList.add('hidden');
-    document.getElementById('dropZone').classList.remove('hidden');
-  } else renderFileQueue();
+function removeFile(i) {
+  txQueue.splice(i, 1);
+  txMeta.splice(i, 1);
+  if (!txQueue.length) {
+    document.getElementById('fileQueue').classList.add('hidden');
+    document.getElementById('dropzone').classList.remove('hidden');
+  } else renderQueue();
 }
 
-function setQueueItemStatus(idx, status) {
-  const li = document.getElementById(`qi-${idx}`);
+function setFileStatus(i, status) {
+  const li = document.getElementById(`fqi-${i}`);
   if (!li) return;
-  li.className = `file-item ${status}`;
-  const b = li.querySelector('.fi-st');
-  if (b) { b.className = `fi-st ${status}`; b.textContent = status; }
+  li.className = `fq-item ${status}`;
+  const b = li.querySelector('.fq-st');
+  if (b) { b.className = `fq-st ${status}`; b.textContent = status; }
 }
 
-/* ════════════════════════════════════════
-   DATACHANNEL EVENTS
-════════════════════════════════════════ */
-function onDCOpen() {
-  console.log('[DC] open');
-  // Trigger pending file transfers
-  if (myRole === 'sender' && fileQueue.length > 0 && currentIdx === 0) {
-    setTimeout(startTransfer, 200);
-  }
-}
-
-function onDCMessage(event) {
-  if (typeof event.data === 'string') {
-    const msg = JSON.parse(event.data);
-    if (msg.type === 'meta') {
-      // New file incoming on receiver
-      rxMeta  = msg;
-      rxChunks = [];
-      rxRecvd  = 0;
-      rxStart  = Date.now();
-      document.getElementById('rxIcon').textContent  = fileIcon(msg.name);
-      document.getElementById('rxName').textContent  = msg.name;
-      document.getElementById('rxSize').textContent  = formatBytes(msg.size);
-      document.getElementById('rxTransferProgress').classList.remove('hidden');
-      document.getElementById('rcSenderInfo').textContent = `Receiving: ${msg.name}`;
-    }
-  } else {
-    // Binary chunk
-    if (!rxMeta) return;
-    rxChunks.push(event.data);
-    rxRecvd += event.data.byteLength;
-    const pct = Math.min(100, Math.round((rxRecvd / rxMeta.size) * 100));
-    updateRxProgress(pct, rxRecvd, rxMeta.size);
-    if (rxRecvd >= rxMeta.size) finalizeFile();
-  }
-}
-
-function onBufferLow() {
-  if (dc && dc._resume) { const fn = dc._resume; dc._resume = null; fn(); }
-}
-
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
    SENDER — TRANSFER
-════════════════════════════════════════ */
-async function startTransfer() {
-  if (!dc || dc.readyState !== 'open') {
-    showToast('⚠️ Not connected yet. Finish connection first.');
+═══════════════════════════════ */
+async function startSend() {
+  if (!conn?.open) {
+    showToast('⚠️ Not connected yet. Wait for receiver to scan the QR.');
     return;
   }
   document.getElementById('btnSend').disabled = true;
-  currentIdx = 0;
+  txIdx = 0;
   await sendNext();
 }
 
 async function sendNext() {
-  if (currentIdx >= fileQueue.length) {
-    document.getElementById('transferProgress').classList.add('hidden');
-    showToast('🎉 All files sent!');
+  if (txIdx >= txQueue.length) {
+    document.getElementById('txCard').classList.add('hidden');
     document.getElementById('btnSend').disabled = false;
+    showToast('🎉 All files sent!');
     return;
   }
 
-  const file = fileQueue[currentIdx];
-  const meta = queueMeta[currentIdx];
+  const file = txQueue[txIdx];
+  const meta = txMeta[txIdx];
   meta.status = 'active';
-  setQueueItemStatus(currentIdx, 'active');
+  setFileStatus(txIdx, 'active');
 
-  // Send metadata
-  dc.send(JSON.stringify({
-    type: 'meta',
-    name: file.name,
-    size: file.size,
-    fileType: file.type || 'application/octet-stream',
-    totalChunks: Math.ceil(file.size / CHUNK_SIZE),
+  // 1. Send metadata as JSON string
+  conn.send(JSON.stringify({
+    type:      'meta',
+    name:      file.name,
+    size:      file.size,
+    fileType:  file.type || 'application/octet-stream',
   }));
 
-  // Show transfer card
-  document.getElementById('transferProgress').classList.remove('hidden');
-  document.getElementById('tpIcon').textContent = fileIcon(file.name);
-  document.getElementById('tpName').textContent = file.name;
-  document.getElementById('tpSize').textContent = formatBytes(file.size);
-  resetTransferUI();
+  // 2. Setup transfer UI
+  document.getElementById('txCard').classList.remove('hidden');
+  document.getElementById('txIco').textContent  = fileIcon(file.name);
+  document.getElementById('txName').textContent = file.name;
+  document.getElementById('txSz').textContent   = formatBytes(file.size);
+  resetTxUI();
   txStart = Date.now();
-  txSent  = 0;
+  txBytes = 0;
 
-  // Stream file
-  const reader = file.stream().getReader();
-
-  const pump = async () => {
-    while (true) {
-      if (dc.bufferedAmount > BUFFER_HIGH) {
-        await new Promise(r => { dc._resume = r; });
-      }
-      const { done, value } = await reader.read();
-      if (done) break;
-      dc.send(value.buffer);
-      txSent += value.byteLength;
-      const pct = Math.min(100, Math.round((txSent / file.size) * 100));
-      updateTxProgress(pct, txSent, file.size);
-    }
-  };
+  // 3. Stream file in 64KB chunks
+  const stream = file.stream();
+  const reader = stream.getReader();
 
   try {
-    await pump();
+    while (true) {
+      // Backpressure: PeerJS DataConnection doesn't expose bufferedAmount
+      // directly, so we use a small delay when sending large chunks
+      // to avoid overwhelming the buffer
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // Send raw ArrayBuffer chunk
+      conn.send(value.buffer);
+
+      txBytes += value.byteLength;
+      const pct = Math.min(100, Math.round((txBytes / file.size) * 100));
+      updateTxUI(pct, txBytes, file.size);
+
+      // Yield to keep UI responsive and avoid buffer overflow
+      if (txBytes % (512 * 1024) < CHUNK_SIZE) {
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+
     meta.status = 'done';
-    setQueueItemStatus(currentIdx, 'done');
-    addHistory(file.name, file.size, 'sent');
+    setFileStatus(txIdx, 'done');
+    addSentHistory(file.name, file.size);
+
   } catch(err) {
     console.error('[TX]', err);
     meta.status = 'error';
-    setQueueItemStatus(currentIdx, 'error');
-    addHistory(file.name, file.size, 'error');
+    setFileStatus(txIdx, 'error');
+    addSentHistory(file.name, file.size, true);
+    showToast('❌ Error sending: ' + file.name);
   }
 
-  currentIdx++;
+  txIdx++;
   await sendNext();
 }
 
-function resetTransferUI() {
-  document.getElementById('tpFill').style.width = '0%';
-  document.getElementById('tpPct').textContent  = '0%';
-  document.getElementById('tpSpeed').textContent = '—';
-  document.getElementById('tpETA').textContent   = '—';
-  document.getElementById('tpSent').textContent  = '—';
+function resetTxUI() {
+  document.getElementById('txFill').style.width  = '0%';
+  document.getElementById('txPct').textContent   = '0%';
+  document.getElementById('txSpd').textContent   = '—';
+  document.getElementById('txEta').textContent   = '—';
+  document.getElementById('txDone').textContent  = '—';
 }
 
-function updateTxProgress(pct, bytes, total) {
-  document.getElementById('tpFill').style.width = pct + '%';
-  document.getElementById('tpPct').textContent  = pct + '%';
-  document.getElementById('tpSent').textContent = formatBytes(bytes) + ' / ' + formatBytes(total);
-  const e = (Date.now() - txStart) / 1000 || .001;
-  const sp = bytes / e;
-  document.getElementById('tpSpeed').textContent = formatSpeed(sp);
-  document.getElementById('tpETA').textContent   = formatETA(sp > 0 ? (total - bytes) / sp : 0);
+function updateTxUI(pct, bytes, total) {
+  document.getElementById('txFill').style.width  = pct + '%';
+  document.getElementById('txPct').textContent   = pct + '%';
+  document.getElementById('txDone').textContent  = formatBytes(bytes) + ' / ' + formatBytes(total);
+  const elapsed = (Date.now() - txStart) / 1000 || 0.001;
+  const speed   = bytes / elapsed;
+  document.getElementById('txSpd').textContent = formatSpeed(speed);
+  document.getElementById('txEta').textContent = formatETA(speed > 0 ? (total - bytes) / speed : 0);
 }
 
-/* ════════════════════════════════════════
-   RECEIVER — REASSEMBLY
-════════════════════════════════════════ */
 function updateRxProgress(pct, bytes, total) {
-  document.getElementById('rxFill').style.width    = pct + '%';
-  document.getElementById('rxPct').textContent     = pct + '%';
-  document.getElementById('rxReceived2').textContent = formatBytes(bytes) + ' / ' + formatBytes(total);
-  const e  = (Date.now() - rxStart) / 1000 || .001;
-  const sp = bytes / e;
-  document.getElementById('rxSpeed').textContent = formatSpeed(sp);
-  document.getElementById('rxETA').textContent   = formatETA(sp > 0 ? (total - bytes) / sp : 0);
+  document.getElementById('rxFill').style.width  = pct + '%';
+  document.getElementById('rxPct').textContent   = pct + '%';
+  document.getElementById('rxGot').textContent   = formatBytes(bytes) + ' / ' + formatBytes(total);
+  if (bytes > 0) {
+    const elapsed = (Date.now() - rxStart) / 1000 || 0.001;
+    const speed   = bytes / elapsed;
+    document.getElementById('rxSpd').textContent = formatSpeed(speed);
+    document.getElementById('rxEta').textContent = formatETA(speed > 0 ? (total - bytes) / speed : 0);
+  }
 }
 
-function finalizeFile() {
-  const blob = new Blob(rxChunks, { type: rxMeta.fileType });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = rxMeta.name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-  addRxHistory(rxMeta.name, rxMeta.size, blob);
-  showToast('✅ Saved: ' + rxMeta.name);
-  document.getElementById('rcSenderInfo').textContent = 'Waiting for more files…';
-  document.getElementById('rxTransferProgress').classList.add('hidden');
-  rxMeta = null; rxChunks = []; rxRecvd = 0;
+/* ═══════════════════════════════
+   STATUS
+═══════════════════════════════ */
+function setConnStatus(role, state, text) {
+  const dotId = role === 'sender' ? 'sDot' : 'rDot';
+  const txtId = role === 'sender' ? 'sText' : 'rText';
+  const dot   = document.getElementById(dotId);
+  const txt   = document.getElementById(txtId);
+  if (dot) dot.className = 'cb-dot ' + state;
+  if (txt) txt.textContent = text;
 }
 
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
    HISTORY
-════════════════════════════════════════ */
-function addHistory(name, size, type) {
-  history.unshift({ name, size, type, time: new Date() });
-  const empty = document.getElementById('historyEmpty');
-  const list  = document.getElementById('historyList');
-  if (!list) return;
+═══════════════════════════════ */
+function addSentHistory(name, size, error = false) {
+  const empty = document.getElementById('sHistEmpty');
+  const list  = document.getElementById('sHistList');
   if (empty) empty.style.display = 'none';
-
   const li = document.createElement('li');
   li.className = 'hist-item';
   const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -912,20 +700,17 @@ function addHistory(name, size, type) {
       <span class="hi-n" title="${esc(name)}">${esc(name)}</span>
       <span class="hi-m">${formatBytes(size)} · ${t}</span>
     </div>
-    <span class="hi-badge ${type}">${type}</span>
+    <span class="hi-badge ${error ? 'error' : 'sent'}">${error ? 'error' : 'sent'}</span>
   `;
-  list.prepend(li);
+  list?.prepend(li);
 }
 
 function addRxHistory(name, size, blob) {
-  const empty = document.getElementById('rxHistoryEmpty');
-  const list  = document.getElementById('rxHistoryList');
-  if (!list) return;
+  const empty = document.getElementById('rHistEmpty');
+  const list  = document.getElementById('rHistList');
   if (empty) empty.style.display = 'none';
-
-  const idx = history.length;
-  history.unshift({ name, size, type: 'received', blob, time: new Date() });
-
+  const idx = rxHistory.length;
+  rxHistory.push({ name, size, blob });
   const li = document.createElement('li');
   li.className = 'hist-item';
   const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -936,13 +721,13 @@ function addRxHistory(name, size, blob) {
       <span class="hi-m">${formatBytes(size)} · ${t}</span>
     </div>
     <span class="hi-badge received">received</span>
-    <button class="hi-dl" onclick="reDownload(${history.length-1})">↓ Save</button>
+    <button class="hi-dl" onclick="reDownload(${idx})">↓ Save again</button>
   `;
-  list.prepend(li);
+  list?.prepend(li);
 }
 
 function reDownload(idx) {
-  const item = history[idx];
+  const item = rxHistory[idx];
   if (!item?.blob) return;
   const url = URL.createObjectURL(item.blob);
   const a   = document.createElement('a');
@@ -950,21 +735,68 @@ function reDownload(idx) {
   setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
 
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
+   PARTICLES (background effect)
+═══════════════════════════════ */
+function initParticles() {
+  const canvas = document.getElementById('particles');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  let W, H, dots = [];
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Create sparse dots
+  for (let i = 0; i < 60; i++) {
+    dots.push({
+      x: Math.random() * window.innerWidth,
+      y: Math.random() * window.innerHeight,
+      r: Math.random() * 1.2 + .3,
+      vx: (Math.random() - .5) * .25,
+      vy: (Math.random() - .5) * .25,
+      a: Math.random() * .5 + .1,
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    dots.forEach(d => {
+      d.x += d.vx; d.y += d.vy;
+      if (d.x < 0) d.x = W;
+      if (d.x > W) d.x = 0;
+      if (d.y < 0) d.y = H;
+      if (d.y > H) d.y = 0;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(129,140,248,${d.a})`;
+      ctx.fill();
+    });
+    requestAnimationFrame(draw);
+  }
+  draw();
+}
+
+/* ═══════════════════════════════
    TOAST
-════════════════════════════════════════ */
+═══════════════════════════════ */
 let _tt = null;
-function showToast(msg, ms = 3000) {
+function showToast(msg, ms = 3200) {
   const el = document.getElementById('toast');
+  if (!el) return;
   el.textContent = msg;
   el.classList.remove('hidden');
   clearTimeout(_tt);
   _tt = setTimeout(() => el.classList.add('hidden'), ms);
 }
 
-/* ════════════════════════════════════════
+/* ═══════════════════════════════
    FORMAT HELPERS
-════════════════════════════════════════ */
+═══════════════════════════════ */
 function formatBytes(b) {
   if (!b) return '0 B';
   const k = 1024, u = ['B','KB','MB','GB','TB'];
@@ -972,9 +804,9 @@ function formatBytes(b) {
   return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + u[i];
 }
 function formatSpeed(bps) {
-  if (bps < 1024)    return bps.toFixed(0) + ' B/s';
-  if (bps < 1048576) return (bps / 1024).toFixed(1) + ' KB/s';
-  return (bps / 1048576).toFixed(2) + ' MB/s';
+  if (bps < 1024)    return bps.toFixed(0)     + ' B/s';
+  if (bps < 1048576) return (bps/1024).toFixed(1) + ' KB/s';
+  return (bps/1048576).toFixed(2) + ' MB/s';
 }
 function formatETA(s) {
   if (!isFinite(s) || s < 0) return '—';
@@ -984,15 +816,17 @@ function formatETA(s) {
 }
 function fileIcon(n) {
   const e = (n||'').split('.').pop().toLowerCase();
-  return({pdf:'📄',png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',webp:'🖼️',svg:'🖼️',
-    mp4:'🎬',mkv:'🎬',avi:'🎬',mov:'🎬',webm:'🎬',
-    mp3:'🎵',wav:'🎵',flac:'🎵',ogg:'🎵',aac:'🎵',
-    zip:'🗜️',rar:'🗜️',gz:'🗜️','7z':'🗜️',tar:'🗜️',
-    doc:'📝',docx:'📝',txt:'📝',md:'📝',rtf:'📝',
-    xls:'📊',xlsx:'📊',csv:'📊',
-    ppt:'📋',pptx:'📋',
-    js:'💻',ts:'💻',py:'💻',html:'💻',css:'💻',json:'💻',
-    apk:'📱',exe:'⚙️',dmg:'💿',iso:'💿'})[e]||'📎';
+  return ({
+    pdf:'📄',png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',webp:'🖼️',svg:'🖼️',bmp:'🖼️',
+    mp4:'🎬',mkv:'🎬',avi:'🎬',mov:'🎬',webm:'🎬',m4v:'🎬',
+    mp3:'🎵',wav:'🎵',flac:'🎵',ogg:'🎵',aac:'🎵',m4a:'🎵',
+    zip:'🗜️',rar:'🗜️',gz:'🗜️','7z':'🗜️',tar:'🗜️',bz2:'🗜️',
+    doc:'📝',docx:'📝',txt:'📝',md:'📝',rtf:'📝',odt:'📝',
+    xls:'📊',xlsx:'📊',csv:'📊',ods:'📊',
+    ppt:'📋',pptx:'📋',odp:'📋',
+    js:'💻',ts:'💻',py:'💻',html:'💻',css:'💻',json:'💻',xml:'💻',sh:'💻',
+    apk:'📱',exe:'⚙️',dmg:'💿',iso:'💿',msi:'⚙️',
+  })[e] || '📎';
 }
 function esc(s) {
   return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
