@@ -1,368 +1,194 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-  <title>ShareDrop ✈️ Instant File Transfer</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=Nunito+Sans:wght@400;600;700&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="style.css"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DropBeam — P2P File Transfer</title>
+  <link rel="stylesheet" href="style.css" />
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
 </head>
 <body>
 
-<!-- ░░ ANIMATED BACKGROUND ░░ -->
-<div class="bg-scene">
-  <div class="bg-gradient-animated"></div>
-  <div class="blob blob-1"></div>
-  <div class="blob blob-2"></div>
-  <div class="blob blob-3"></div>
-  <div class="blob blob-4"></div>
-  <div class="deco ds-1">📁</div>
-  <div class="deco ds-2">⚡</div>
-  <div class="deco ds-3">🌟</div>
-  <div class="deco ds-4">📱</div>
-  <div class="deco ds-5">💫</div>
-  <div class="deco ds-6">🚀</div>
-  <div class="deco ds-7">📡</div>
+<canvas id="bg-canvas"></canvas>
+<div id="toast-container"></div>
+
+<!-- File Request Modal -->
+<div class="modal-overlay hidden" id="file-request-modal">
+  <div class="modal-box">
+    <div class="modal-icon">📨</div>
+    <h3>Incoming File</h3>
+    <p id="file-request-desc">Someone wants to send you a file.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="rejectFile()">❌ Reject</button>
+      <button class="btn btn-success" onclick="acceptFile()">✅ Accept</button>
+    </div>
+  </div>
 </div>
 
-<!-- ░░ SUCCESS FLASH OVERLAY ░░ -->
-<div class="success-flash hidden" id="successFlash">
-  <div class="sf-inner">
-    <div class="sf-checkmark">
-      <svg viewBox="0 0 52 52" class="sf-svg">
-        <circle class="sf-circle" cx="26" cy="26" r="25" fill="none"/>
-        <path class="sf-check" fill="none" d="M14 27 l8 8 l16 -16"/>
-      </svg>
-    </div>
-    <div class="sf-text">Transfer Complete!</div>
+<!-- Image Preview Modal -->
+<div class="modal-overlay hidden" id="img-preview-modal">
+  <div style="text-align:center">
+    <img id="preview-img" src="" alt="Preview"
+      style="max-width:90vw;max-height:80vh;border-radius:12px"/>
+    <br/><br/>
+    <button class="btn btn-ghost" onclick="closeImagePreview()">Close</button>
   </div>
 </div>
 
 <div id="app">
 
-  <!-- ══════════ HOME ══════════ -->
-  <div class="screen active" id="sHome">
-    <div class="home-wrap">
-
-      <div class="logo-block">
-        <div class="logo-orb">
-          <span class="logo-plane">✈️</span>
-          <div class="orb-pulse"></div>
-        </div>
-        <div>
-          <h1 class="logo-name">ShareDrop</h1>
-          <p class="logo-tagline">P2P · Zero Server · Encrypted</p>
-        </div>
+  <!-- Header -->
+  <header>
+    <div class="logo">Drop<span>Beam</span><span class="logo-dot"></span></div>
+    <div class="header-right">
+      <div class="name-chip" onclick="renameDevice()">
+        <span id="device-emoji">💻</span>
+        <span id="device-name-display">My Device</span>
+        <span class="edit-icon">✏️</span>
       </div>
-
-      <div class="hero-text">
-        <h2 class="hero-h">Send files<br/><em class="hero-em">instantly!</em> ✨</h2>
-        <p class="hero-p">No accounts. No cloud. Files fly directly between devices at full speed!</p>
-      </div>
-
-      <div class="net-badge" id="netBadge">
-        <span class="nb-dot" id="nsDot"></span>
-        <span id="nsText">Connecting to network…</span>
-      </div>
-
-      <div class="role-buttons">
-        <button class="role-btn send-role" id="btnRoleSend" onclick="chooseRole('sender')" disabled>
-          <div class="rb-glow"></div>
-          <div class="rb-icon">📤</div>
-          <div class="rb-label">Send Files</div>
-          <div class="rb-sub">Show your QR code</div>
-          <div class="rb-arrow">→</div>
-        </button>
-
-        <button class="role-btn recv-role" id="btnRoleRecv" onclick="chooseRole('receiver')" disabled>
-          <div class="rb-glow"></div>
-          <div class="rb-icon">📥</div>
-          <div class="rb-label">Receive Files</div>
-          <div class="rb-sub">Scan sender's QR</div>
-          <div class="rb-arrow">→</div>
-        </button>
-      </div>
-
-      <div class="home-chips">
-        <span class="home-chip" id="devLabel">🔍 Detecting…</span>
-        <span class="home-chip">🔒 E2E Encrypted</span>
-        <span class="home-chip">♾️ Any File Size</span>
-      </div>
-
+      <button class="theme-btn" onclick="toggleTheme()">🌙</button>
     </div>
-  </div>
+  </header>
 
-  <!-- ══════════ SENDER SCREEN ══════════ -->
-  <div class="screen" id="sSender">
-
-    <div class="topbar">
-      <button class="back-btn" onclick="goHome()">← Back</button>
-      <span class="tb-badge send-badge">📤 Sender</span>
-      <div class="tb-conn">
-        <span class="tc-dot" id="sDot"></span>
-        <span id="sText">Waiting…</span>
+  <!-- HOME -->
+  <section class="screen active" id="screen-home">
+    <h1 class="hero-title">Send Files.<br/><span class="accent">Instantly.</span></h1>
+    <p class="hero-sub">No servers. No storage. Direct device-to-device transfer.</p>
+    <div class="action-cards">
+      <div class="action-card" onclick="goToSend()">
+        <div class="card-icon">📤</div>
+        <h3>Send Files</h3>
+        <p>Create room & share code</p>
+      </div>
+      <div class="action-card" onclick="goToReceive()">
+        <div class="card-icon">📥</div>
+        <h3>Receive Files</h3>
+        <p>Scan QR or enter code</p>
       </div>
     </div>
-
-    <div class="sender-grid">
-
-      <!-- QR Card (hides after connection) -->
-      <div class="glass-card" id="qrSection">
-        <div class="gc-header">
-          <span class="step-ball">1</span>
-          <div>
-            <div class="gc-title">Receiver scans this QR 📷</div>
-            <div class="gc-sub">Auto-connects instantly!</div>
-          </div>
-        </div>
-
-        <div class="qr-stage" id="qrFrame">
-          <div class="qr-loading" id="qrLoader">
-            <div class="dot-loader"><span></span><span></span><span></span></div>
-            <p>Generating QR…</p>
-          </div>
-          <div id="qrCanvas"></div>
-        </div>
-
-        <div class="pid-row" id="peerIdStrip" style="display:none">
-          <span class="pid-tag">ID</span>
-          <span class="pid-val" id="myPeerIdDisplay">—</span>
-          <button class="pid-copy-btn" onclick="copyPeerId()" id="copyBtn">📋 Copy</button>
-        </div>
+    <div class="info-bar">
+      <div>
+        <div class="info-title">🔒 End-to-End Encrypted</div>
+        <div class="info-sub">WebRTC DTLS · No file stored anywhere</div>
       </div>
+      <div style="font-size:2rem">🛡️</div>
+    </div>
+  </section>
 
-      <!-- Connected banner (shown after QR scan) -->
-      <div class="conn-success-banner hidden" id="connSuccessBanner">
-        <div class="csb-inner">
-          <div class="csb-check">
-            <svg viewBox="0 0 52 52" class="csb-svg">
-              <circle class="csb-circle" cx="26" cy="26" r="25" fill="none"/>
-              <path class="csb-path" fill="none" d="M14 27 l8 8 l16 -16"/>
-            </svg>
-          </div>
-          <div class="csb-text">
-            <div class="csb-title">Receiver Connected! 🎉</div>
-            <div class="csb-sub">Add files below & hit Send</div>
-          </div>
-        </div>
-      </div>
+  <!-- SEND -->
+  <section class="screen" id="screen-send">
+    <button class="btn btn-ghost back-btn" onclick="goHome()">← Back</button>
+    <h2 class="screen-title">Your Room</h2>
 
-      <!-- Files Card -->
-      <div class="glass-card">
-        <div class="gc-header">
-          <span class="step-ball">2</span>
-          <div>
-            <div class="gc-title">Add files to send 📂</div>
-            <div class="gc-sub">Drag &amp; drop or browse — then hit Send</div>
-          </div>
-        </div>
-
-        <!-- Drop zone -->
-        <div class="drop-zone" id="dropzone">
-          <input type="file" id="fileInput" multiple style="display:none" onchange="onFilePicked(this.files)"/>
-          <div class="dz-inner">
-            <div class="dz-orbit">
-              <span class="dz-center-icon">📎</span>
-              <div class="dz-ring-1"></div>
-              <div class="dz-ring-2"></div>
-            </div>
-            <p class="dz-big">Drop files here!</p>
-            <p class="dz-small">Any type · Any size</p>
-          </div>
-          <button class="candy-btn purple-candy" onclick="document.getElementById('fileInput').click()">
-            📂 Browse Files
-          </button>
-        </div>
-
-        <!-- File queue -->
-        <div class="file-queue hidden" id="fileQueue">
-          <div class="fq-bar">
-            <div class="fq-left">
-              <span class="fq-count" id="fqCount">0 files</span>
-              <span class="fq-sz" id="fqTotal"></span>
-            </div>
-            <button class="mini-pill" onclick="document.getElementById('fileInput').click()">+ Add more</button>
-          </div>
-          <ul class="fq-list" id="fqList"></ul>
-          <div class="fq-footer">
-            <button class="candy-btn ghost-candy sm" onclick="clearQueue()">🗑 Clear</button>
-            <button class="candy-btn green-candy" id="btnSend" onclick="startSend()">🚀 Send Files!</button>
-          </div>
-        </div>
-
-        <!-- Active transfer card -->
-        <div class="xfer-card hidden" id="txCard">
-          <div class="xfer-top">
-            <span class="xfer-ico" id="txIco">📄</span>
-            <div class="xfer-meta">
-              <div class="xfer-filename" id="txName">—</div>
-              <div class="xfer-filesize" id="txSz">—</div>
-            </div>
-            <span class="xfer-percent" id="txPct">0%</span>
-          </div>
-          <div class="candy-progress">
-            <div class="candy-fill" id="txFill"></div>
-          </div>
-          <div class="stat-row">
-            <div class="stat-pill"><span>Speed</span><strong id="txSpd">—</strong></div>
-            <div class="stat-pill"><span>ETA</span><strong id="txEta">—</strong></div>
-            <div class="stat-pill"><span>Done</span><strong id="txDone">—</strong></div>
-          </div>
-          <div class="xfer-buttons">
-            <button class="candy-btn yellow-candy sm" id="btnPause" onclick="togglePause()">⏸ Pause</button>
-            <button class="candy-btn red-candy sm" onclick="cancelTransfer()">✕ Cancel</button>
-          </div>
-        </div>
-
-      </div><!-- /files card -->
-    </div><!-- /sender-grid -->
-
-    <div class="hist-section">
-      <div class="hist-head">📋 Transfer History</div>
-      <div class="hist-empty" id="sHistEmpty">Nothing sent yet! 👀</div>
-      <ul class="hist-list" id="sHistList"></ul>
+    <div class="card">
+      <p class="card-sub">Share this QR code or Room ID with the receiver</p>
+      <div id="qr-container"></div>
+      <div class="room-label">Room ID</div>
+      <div class="room-code" id="room-code-display">Connecting...</div>
+      <button class="btn btn-primary" onclick="copyRoomCode()">📋 Copy Room ID</button>
     </div>
 
-  </div><!-- /sSender -->
-
-  <!-- ══════════ RECEIVER SCREEN ══════════ -->
-  <div class="screen" id="sReceiver">
-
-    <div class="topbar">
-      <button class="back-btn" onclick="goHome()">← Back</button>
-      <span class="tb-badge recv-badge">📥 Receiver</span>
-      <div class="tb-conn">
-        <span class="tc-dot" id="rDot"></span>
-        <span id="rText">Scan QR…</span>
+    <div class="status-bar">
+      <div class="spinner" id="waiting-spinner"></div>
+      <div>
+        <div class="status-title" id="waiting-status">Waiting for receiver...</div>
+        <div class="status-sub">Share the Room ID above</div>
       </div>
     </div>
+  </section>
 
-    <!-- Scan body -->
-    <div class="recv-scan-wrap" id="recvScanBody">
-      <div class="glass-card scanner-card">
+  <!-- RECEIVE -->
+  <section class="screen" id="screen-receive">
+    <button class="btn btn-ghost back-btn" onclick="goHome()">← Back</button>
+    <h2 class="screen-title">Join Room</h2>
 
-        <div class="scan-hero">
-          <div class="scan-icon-orb">📷</div>
-          <h3 class="scan-title">Scan Sender's QR Code</h3>
-          <p class="scan-sub">Point camera at QR — auto-connects! 🎯</p>
-        </div>
-
-        <div class="cam-viewport" id="camWrap">
-          <video id="camVideo" autoplay playsinline muted></video>
-          <canvas id="camCanvas" style="display:none"></canvas>
-          <div class="cam-corners">
-            <i class="cc cc-tl"></i><i class="cc cc-tr"></i>
-            <i class="cc cc-bl"></i><i class="cc cc-br"></i>
-            <div class="cam-scan-line" id="scanLaser"></div>
-          </div>
-          <div class="cam-status" id="camPill">Tap Start Camera ↓</div>
-        </div>
-
-        <div class="scan-btns">
-          <button class="candy-btn purple-candy full-w" id="btnCamOn" onclick="startCam()">📸 Start Camera</button>
-          <button class="candy-btn ghost-candy hidden" id="btnCamOff" onclick="stopCam()">Stop Camera</button>
-        </div>
-
-        <!-- Manual Peer ID fallback -->
-        <div class="fallback-section hidden" id="camDenied">
-          <p class="fallback-note">⚠️ Camera unavailable — enter Peer ID manually:</p>
-          <div class="fallback-row">
-            <input type="text" id="manualPeerId" class="cartoon-input" placeholder="Paste Peer ID here…"
-              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"/>
-            <button class="candy-btn green-candy" onclick="connectByPeerId()">Connect!</button>
-          </div>
-        </div>
-
-      </div>
-    </div><!-- /recvScanBody -->
-
-    <!-- Connected state -->
-    <div class="recv-connected-wrap hidden" id="recvConnected">
-
-      <!-- Animated connected banner -->
-      <div class="recv-conn-banner" id="recvConnectedBanner">
-        <div class="rcb-check">
-          <svg viewBox="0 0 52 52" class="rcb-svg">
-            <circle class="rcb-circle" cx="26" cy="26" r="25" fill="none"/>
-            <path class="rcb-path" fill="none" d="M14 27 l8 8 l16 -16"/>
-          </svg>
-        </div>
-        <div class="rcb-info">
-          <div class="rcb-title">Connected to Sender!</div>
-          <div class="rcb-sub" id="rcStatus">Waiting for files…</div>
-        </div>
-        <div class="rcb-pulse"></div>
-      </div>
-
-      <!-- Active receive card -->
-      <div class="xfer-card hidden" id="rxCard">
-        <div class="xfer-top">
-          <span class="xfer-ico" id="rxIco">📄</span>
-          <div class="xfer-meta">
-            <div class="xfer-filename" id="rxName">—</div>
-            <div class="xfer-filesize" id="rxSz">—</div>
-          </div>
-          <span class="xfer-percent" id="rxPct">0%</span>
-        </div>
-        <div class="candy-progress">
-          <div class="candy-fill" id="rxFill"></div>
-        </div>
-        <div class="stat-row">
-          <div class="stat-pill"><span>Speed</span><strong id="rxSpd">—</strong></div>
-          <div class="stat-pill"><span>ETA</span><strong id="rxEta">—</strong></div>
-          <div class="stat-pill"><span>Got</span><strong id="rxGot">—</strong></div>
-        </div>
-      </div>
-
-      <div class="hist-section">
-        <div class="hist-head">📥 Received Files</div>
-        <div class="hist-empty" id="rHistEmpty">Files will land here! 🛬</div>
-        <ul class="hist-list" id="rHistList"></ul>
-      </div>
-    </div><!-- /recvConnected -->
-
-  </div><!-- /sReceiver -->
-
-</div><!-- /app -->
-
-<!-- ══ TOAST ══ -->
-<div class="toast hidden" id="toast"></div>
-
-<!-- ══ CONFIRM MODAL ══ -->
-<div class="modal-overlay hidden" id="modalOverlay">
-  <div class="modal-card">
-    <div class="modal-icon" id="modalEmoji">🤔</div>
-    <div class="modal-title" id="modalTitle">Confirm</div>
-    <div class="modal-body" id="modalBody"></div>
-    <div class="modal-actions">
-      <button class="candy-btn ghost-candy" onclick="modalCancel()">Cancel</button>
-      <button class="candy-btn green-candy" id="modalConfirmBtn" onclick="modalConfirm()">Let's Go! 🚀</button>
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-scan" onclick="switchJoinTab('scan')">📷 Scan QR</button>
+      <button class="tab-btn" id="tab-code" onclick="switchJoinTab('code')">⌨️ Enter ID</button>
     </div>
-  </div>
-</div>
 
-<!-- ══ RETRY POPUP ══ -->
-<div class="retry-overlay hidden" id="retryOverlay">
-  <div class="retry-card">
-    <div class="no-wifi-anim">
-      <div class="nw-arc nw-arc1"></div>
-      <div class="nw-arc nw-arc2"></div>
-      <div class="nw-arc nw-arc3"></div>
-      <div class="nw-dot"></div>
-      <div class="nw-cross">✕</div>
+    <!-- Scan -->
+    <div id="join-scan" class="tab-content">
+      <div class="scan-wrap">
+        <video id="scanner-video" autoplay playsinline muted></video>
+        <div class="scan-line"></div>
+      </div>
+      <canvas id="scanner-canvas" class="hidden"></canvas>
+      <button class="btn btn-ghost" onclick="startScan()">🔄 Restart Camera</button>
+      <p class="hint">Point camera at the QR code</p>
     </div>
-    <h3 class="retry-title">Connection Lost 😢</h3>
-    <p class="retry-msg" id="retryDesc">Network disconnected. Tap Retry to reconnect!</p>
-    <div class="retry-countdown" id="retryTimer"></div>
-    <div class="retry-actions">
-      <button class="candy-btn green-candy big-candy" onclick="retryConnection()">🔄 Retry Now</button>
-      <button class="candy-btn ghost-candy" onclick="retryGoHome()">🏠 Go Home</button>
+
+    <!-- Code -->
+    <div id="join-code" class="tab-content hidden">
+      <p class="hint">Paste the Room ID from the sender's screen</p>
+      <input
+        id="peer-id-input"
+        class="peer-id-input"
+        placeholder="Paste Room ID here..."
+        onkeydown="if(event.key==='Enter') joinByCode()"
+      />
+      <button class="btn btn-primary" onclick="joinByCode()">Connect →</button>
     </div>
-  </div>
+  </section>
+
+  <!-- TRANSFER -->
+  <section class="screen" id="screen-transfer">
+
+    <div class="peer-bar">
+      <div class="peer-avatar" id="peer-avatar">💻</div>
+      <div style="flex:1">
+        <div class="peer-name" id="peer-name-display">Connected Peer</div>
+        <div class="connected-badge">
+          <div class="connected-dot"></div>
+          Connected via P2P
+        </div>
+      </div>
+      <button class="btn btn-ghost small-btn" onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <div class="tab-bar">
+      <button class="tab-btn active" id="ttab-files" onclick="switchTransferTab('files')">📁 Files</button>
+      <button class="tab-btn" id="ttab-clip" onclick="switchTransferTab('clip')">📋 Clipboard</button>
+      <button class="tab-btn" id="ttab-hist" onclick="switchTransferTab('hist')">🕓 History</button>
+    </div>
+
+    <!-- Files -->
+    <div id="tcontent-files" class="tab-content">
+      <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <div class="drop-icon">🗂️</div>
+        <p><strong>Click to select files</strong></p>
+        <p class="hint">or drag & drop · All types · Large files OK</p>
+        <input type="file" id="file-input" class="hidden" multiple />
+      </div>
+      <div id="file-queue"></div>
+      <button class="btn btn-primary full-btn hidden" id="send-btn" onclick="sendFiles()">
+        📤 Send Files
+      </button>
+      <div id="active-transfers"></div>
+    </div>
+
+    <!-- Clipboard -->
+    <div id="tcontent-clip" class="tab-content hidden">
+      <p class="hint">Share text instantly with the other device</p>
+      <textarea id="clipboard-text" placeholder="Type or paste text here..."></textarea>
+      <button class="btn btn-primary" onclick="sendClipboard()">📨 Send Text</button>
+      <div class="divider"></div>
+      <div class="section-label">Received Text</div>
+      <div id="received-clipboard" class="received-box">Nothing received yet...</div>
+      <button class="btn btn-ghost hidden" id="copy-received-btn" onclick="copyReceivedText()">
+        📋 Copy
+      </button>
+    </div>
+
+    <!-- History -->
+    <div id="tcontent-hist" class="tab-content hidden">
+      <div class="section-label">Transfer History (this session)</div>
+      <div id="transfer-history"><p class="hint">No transfers yet.</p></div>
+    </div>
+
+  </section>
 </div>
 
 <script src="app.js"></script>
